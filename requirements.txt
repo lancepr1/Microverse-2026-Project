@@ -1,0 +1,6 @@
+# microverse_core itself is pure stdlib so it runs inside Blender's bundled
+# Python with zero installs. Everything below is for development outside Blender.
+pytest>=7
+# Hendricks / loaders: uncomment when wiring the real NLR dataset
+# numpy>=1.24
+# pandas>=2.0
