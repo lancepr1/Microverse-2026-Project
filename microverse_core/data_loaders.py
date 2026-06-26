@@ -60,13 +60,15 @@ def load_enf(path: str) -> list[float]:
     """
     values: list[float] = []
     with open(path, newline="") as fh:
-        for row in csv.reader(fh):
+        reader = csv.reader(fh)
+        next(reader)  # skip the metadata row (UTC timestamp + duration)
+        for row in reader:
             if not row:
                 continue
             try:
-                values.append(float(row[0]))
-            except ValueError:
-                continue  # skip a header line
+                values.append(float(row[1]))  # column 1 is the frequency
+            except (ValueError, IndexError):
+                continue  # skip any malformed rows
     return values
 
 
