@@ -443,63 +443,63 @@ def read_combined_jsonl(path: str):
 # Synthetic fallbacks. Shapes only, not measurements.
 # --------------------------------------------------------------------------
 
-_ENVELOPE = {
-    WorkloadClass.IDLE: (90, 130),
-    WorkloadClass.LLM_INFERENCE: (250, 600),
-    WorkloadClass.LLM_TRAINING: (650, 780),
-    WorkloadClass.IMAGE_GENERATION: (300, 550),
-}
+# _ENVELOPE = {
+#     WorkloadClass.IDLE: (90, 130),
+#     WorkloadClass.LLM_INFERENCE: (250, 600),
+#     WorkloadClass.LLM_TRAINING: (650, 780),
+#     WorkloadClass.IMAGE_GENERATION: (300, 550),
+# }
 
 
-def synthetic_power_profile(
-    workload: WorkloadClass,
-    node_id: str = "node_00",
-    seconds: int = 120,
-    hz: int = 5,
-    seed: Optional[int] = None,
-) -> list[PowerSample]:
-    """A power trace whose *shape* matches the named workload class."""
-    rng = random.Random(seed)
-    lo, hi = _ENVELOPE[workload]
-    n = seconds * hz
-    out: list[PowerSample] = []
-    for i in range(n):
-        t = i / hz
-        if workload is WorkloadClass.LLM_TRAINING:
-            base = hi - 30 + 30 * math.sin(t / 8)
-        elif workload is WorkloadClass.LLM_INFERENCE:
-            burst = hi if rng.random() < 0.18 else lo
-            base = burst
-        elif workload is WorkloadClass.IMAGE_GENERATION:
-            base = lo + (hi - lo) * (0.5 + 0.5 * math.sin(t / 3))
-        else:
-            base = lo + 10 * rng.random()
-        noise = rng.gauss(0, 8)
-        out.append(
-            PowerSample(
-                timestamp=t,
-                node_id=node_id,
-                power_w=max(0.0, base + noise),
-                workload_class=workload.value,
-            )
-        )
-    return out
+# def synthetic_power_profile(
+#     workload: WorkloadClass,
+#     node_id: str = "node_00",
+#     seconds: int = 120,
+#     hz: int = 5,
+#     seed: Optional[int] = None,
+# ) -> list[PowerSample]:
+#     """A power trace whose *shape* matches the named workload class."""
+#     rng = random.Random(seed)
+#     lo, hi = _ENVELOPE[workload]
+#     n = seconds * hz
+#     out: list[PowerSample] = []
+#     for i in range(n):
+#         t = i / hz
+#         if workload is WorkloadClass.LLM_TRAINING:
+#             base = hi - 30 + 30 * math.sin(t / 8)
+#         elif workload is WorkloadClass.LLM_INFERENCE:
+#             burst = hi if rng.random() < 0.18 else lo
+#             base = burst
+#         elif workload is WorkloadClass.IMAGE_GENERATION:
+#             base = lo + (hi - lo) * (0.5 + 0.5 * math.sin(t / 3))
+#         else:
+#             base = lo + 10 * rng.random()
+#         noise = rng.gauss(0, 8)
+#         out.append(
+#             PowerSample(
+#                 timestamp=t,
+#                 node_id=node_id,
+#                 power_w=max(0.0, base + noise),
+#                 workload_class=workload.value,
+#             )
+#         )
+#     return out
 
 
-def synthetic_enf(
-    seconds: int = 120,
-    hz: int = 5,
-    nominal: float = 60.0,
-    seed: Optional[int] = None,
-) -> list[float]:
-    """A 60 Hz ENF trace with the small wandering fluctuation that makes ENF
-    usable as a timestamp. A replay or fabricated trace will not share this
-    wander, which is the property Leiva's verification exploits."""
-    rng = random.Random(seed)
-    out: list[float] = []
-    f = nominal
-    for _ in range(seconds * hz):
-        f += rng.gauss(0, 0.003)
-        f += (nominal - f) * 0.02
-        out.append(f)
-    return out
+# def synthetic_enf(
+#     seconds: int = 120,
+#     hz: int = 5,
+#     nominal: float = 60.0,
+#     seed: Optional[int] = None,
+# ) -> list[float]:
+#     """A 60 Hz ENF trace with the small wandering fluctuation that makes ENF
+#     usable as a timestamp. A replay or fabricated trace will not share this
+#     wander, which is the property Leiva's verification exploits."""
+#     rng = random.Random(seed)
+#     out: list[float] = []
+#     f = nominal
+#     for _ in range(seconds * hz):
+#         f += rng.gauss(0, 0.003)
+#         f += (nominal - f) * 0.02
+#         out.append(f)
+#     return out
