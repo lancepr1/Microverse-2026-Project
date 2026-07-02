@@ -6,22 +6,33 @@ Verifier: runs sequential ENF and NLR checks and produces VerificationResult.
 Replaces fake_verify in scripts/smoke_test.py.
 
 Checks in order -- stops at the first failure:
+
   ENF side (existing):
+  
     1. SequenceGuard          replay attack defense
+    
     2. ENFNominalRangeCheck   injection defense on the RAW frequency
                                value (catches single-sample spikes that
                                normalization would otherwise absorb)
+                               
     3. ENFRangeCheck          injection defense on the normalized
                                signature (flat or out-of-[0,1] shapes)
+                               
     4. ENFContinuityCheck     discontinuity defense (confidence threshold)
+    
     5. DriftMonitor           slow drift defense (CUSUM across windows)
+    
   NLR side (new):
+  
     6. NLRRangeCheck          injection defense (impossible GPU/CPU wattage)
+    
     7. NLRContinuityCheck     discontinuity defense (sudden power/temp jumps)
+    
     8. NLRMonotonicityCheck   tamper defense (cpu uJ counter must only
                                increase, except for known hardware wraps)
 
 Status mapping (per metrics.py -- only FAILED counts as a detection):
+
   TRUSTED  all checks pass, confidence >= CONFIDENCE_TRUSTED
   SUSPECT  all checks pass, confidence in [CONFIDENCE_SUSPECT, TRUSTED)
   FAILED   any check fails definitively
@@ -416,18 +427,25 @@ class Verifier:
     Parameters
     ----------
     component_id : str
+    
         Twin component being verified e.g. "rack_00".
         Must match Hendricks' StateVariable.source_object and
         Marchisano's AttackEvent.target_component so metrics.score()
         can correctly classify true positives.
+        
     warmup_windows : int
+    
         Clean windows before drift baseline is calibrated.
         Keep below the earliest possible attack start.
+        
     strict_ordering : bool
+    
         Enforce strictly increasing timestamps.
         True catches out-of-order replays.
         False catches only exact duplicate timestamps.
+        
     check_nlr : bool
+    
         Whether to run the NLR checks at all. Default True. Set False
         if a given run has no NLR fields available on the sample
         (e.g. ENF-only testing).
@@ -484,6 +502,7 @@ class Verifier:
             sample (if sample IS the combined dict from
             build_combined_records), or via attribute access matching
             the same field names.
+            
         anchor : AnchorRecord
             ENF anchor from AnchorExtractor.extract() at same timestamp.
 
