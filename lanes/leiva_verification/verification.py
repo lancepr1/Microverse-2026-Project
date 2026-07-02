@@ -6,43 +6,35 @@ Verifier: runs sequential ENF and NLR checks and produces VerificationResult.
 Replaces fake_verify in scripts/smoke_test.py.
 
 Checks in order -- stops at the first failure:
-
-  ENF side (existing):
-  
+  ENF side:
     1. SequenceGuard          replay attack defense
-    
-    2. ENFNominalRangeCheck   injection defense on the RAW frequency
-                               value (catches single-sample spikes that
-                               normalization would otherwise absorb)
-                               
-    3. ENFRangeCheck          injection defense on the normalized
-                               signature (flat or out-of-[0,1] shapes)
-                               
-    4. ENFContinuityCheck     discontinuity defense (confidence threshold)
-    
-    5. DriftMonitor           slow drift defense (CUSUM across windows)
-    
-  NLR side (new):
-  
+    2. ENFNominalRangeCheck   injection defense on the RAW frequency value
+                               (catches single-sample spikes that normalization
+                               would otherwise absorb as a new local max/min)
+    3. ENFRangeCheck          injection defense on the normalized signature
+                               (flat or out-of-[0,1] shapes)
+    4. ENFContinuityCheck     discontinuity defense (confidence hard threshold)
+    5. DriftMonitor           slow drift defense (CUSUM across many windows)
+  NLR side (multi-node aware):
     6. NLRRangeCheck          injection defense (impossible GPU/CPU wattage)
-    
-    7. NLRContinuityCheck     discontinuity defense (sudden power/temp jumps)
-    
+                               -- works for any number of nodes, discovers
+                               channels dynamically from record keys
+    7. NLRContinuityCheck     discontinuity defense (sudden power jumps)
+                               -- tracks per-channel state, node-prefixed
+                               column names are unique keys so no collision
     8. NLRMonotonicityCheck   tamper defense (cpu uJ counter must only
                                increase, except for known hardware wraps)
+                               -- discovers all cpu uJ columns dynamically
 
 Status mapping (per metrics.py -- only FAILED counts as a detection):
-
   TRUSTED  all checks pass, confidence >= CONFIDENCE_TRUSTED
   SUSPECT  all checks pass, confidence in [CONFIDENCE_SUSPECT, TRUSTED)
   FAILED   any check fails definitively
 
-Thresholds at the top of this file are starting estimates. Run
-enf_profile.py and nlr_profile.py against real clean data and update
-these before relying on detection results. As of the last team check-in,
-the real ENF dataset showed isolated single-sample capture glitches --
-confirm with the team whether those get smoothed upstream in
-data_loaders.py before tightening CONFIDENCE_TRUSTED/SUSPECT further.
+Thresholds at the top of this file are starting estimates calibrated
+against the two real NLR files profiled so far. Run calibrate_thresholds.py
+and nlr_profile.py against your full clean dataset and update these before
+relying on detection results for the paper.
 """
 
 from __future__ import annotations
@@ -60,72 +52,95 @@ from microverse_core.contracts import (
 
 # ---------------------------------------------------------------------------
 # Tunable thresholds -- ENF side
-# TODO: calibrate against real ENF data once the glitch-handling question
-# is resolved with the team (see module docstring above).
+# TODO: calibrate against real ENF data once the glitch/smoothing question
+# is resolved. Run calibrate_thresholds.py against a clean combined JSONL
+# and paste the output here.
 # ---------------------------------------------------------------------------
 
-CONFIDENCE_TRUSTED = 0.70    # above this -> TRUSTED
-CONFIDENCE_SUSPECT = 0.50    # above this but below TRUSTED -> SUSPECT
-                              # below this -> FAILED (discontinuity)
+CONFIDENCE_TRUSTED = 0.70
+CONFIDENCE_SUSPECT = 0.50
 
-# Raw frequency plausibility -- checked BEFORE normalization, since
-# normalization can absorb an extreme raw value into the signature's
-# shape without it ever looking abnormal post-normalization. This is
-# the raw-value equivalent of GPU_POWER_CEILING_W below: a hard physical
-# bound on what the actual measurement can be, not what its shape looks
-# like relative to its own window.
-# TODO: this generous default (±2.0 Hz) is a placeholder until the team
-# resolves the ENF glitch/smoothing question -- ANCHOR-Grid's real grid
-# data stays within ±0.02-0.05 Hz, but the real dataset profiled so far
-# shows isolated spikes loosely related to capture artifacts. Tighten
-# this once that's resolved.
+# Raw frequency plausibility -- checked BEFORE normalization since
+# normalization absorbs extreme values into the signature shape.
+# Default ±2.0 Hz is generous; tighten once smoothing is confirmed.
 NOMINAL_HZ = 60.0
 NOMINAL_TOLERANCE_HZ = 2.0
 
-CUSUM_THRESHOLD  = 5.0       # accumulated deviation before DRIFT alert
-CUSUM_BASELINE   = 0.30      # expected mean (1 - confidence) for honest ENF
-                              # calibrated automatically after warmup
-CUSUM_HISTORY    = 60        # rolling window size in samples
+CUSUM_THRESHOLD  = 5.0
+CUSUM_BASELINE   = 0.30
+CUSUM_HISTORY    = 60
 
 # ---------------------------------------------------------------------------
 # Tunable thresholds -- NLR side
-# TODO: calibrate against nlr_profile.py output once you've profiled
-# clean data across all five workload modes (offline / online finite /
-# online rate / training llama2 lora / training stable diffusion).
-# These defaults are conservative placeholders based on the two real
-# files already profiled.
+# TODO: run nlr_profile.py across all five workload modes and update.
+# These placeholders come from the P99 step sizes observed in the two
+# real files profiled so far.
 # ---------------------------------------------------------------------------
 
-# Hard power ceilings -- matches the 800W hardware-error cutoff already
-# used in data_loaders.py during ingestion. A value above this is not
-# physically possible for this hardware.
 GPU_POWER_CEILING_W = 800.0
 CPU_POWER_CEILING_W = 800.0
+GPU_MAX_STEP_W      = 470.0
+CPU_MAX_STEP_W      = 16.0
 
-# Max plausible change in watts between two consecutive aggregated
-# windows (each window = 2 seconds of real time). Calibrate from
-# nlr_profile.py's GPU_MAX_STEP_W / CPU_MAX_STEP_W recommendation --
-# these placeholders come from the P99 step size observed across the
-# two real files profiled so far, with margin.
-GPU_MAX_STEP_W = 470.0
-CPU_MAX_STEP_W = 16.0
+# RAPL energy counter hardware wraparound
+CPU_UJ_WRAP_CEILING   = 65_500_000_000
+CPU_UJ_WRAP_TOLERANCE =  2_000_000_000
 
-# RAPL energy counters (uJ) are fixed-width hardware registers that wrap
-# around on overflow. Observed wrap magnitude in real data is ~65.5
-# billion uJ. A decrease NOT close to this size is a real monotonicity
-# violation (tampering); a decrease close to this size is an expected
-# hardware wrap and must not be flagged.
-CPU_UJ_WRAP_CEILING = 65_500_000_000
-CPU_UJ_WRAP_TOLERANCE = 2_000_000_000
-
-# Score values embedded in VerificationResult
+# Score values
 SCORE_TRUSTED      = 0.95
-SCORE_FAILED_HARD  = 0.05    # replay, flat/invalid signature, discontinuity
-SCORE_FAILED_DRIFT = 0.10    # CUSUM threshold crossed
+SCORE_FAILED_HARD  = 0.05
+SCORE_FAILED_DRIFT = 0.10
 
 
 # ---------------------------------------------------------------------------
-# Internal check classes -- ENF side (unchanged from previous version)
+# Helper: discover NLR channel keys dynamically from a record dict
+# ---------------------------------------------------------------------------
+
+def _find_nlr_keys(record: dict) -> dict[str, list[str]]:
+    """
+    Scans a combined record and groups its keys by channel type.
+
+    Works for any node count -- a 1-node record has 16 NLR keys,
+    a 16-node record has 256 NLR keys. The checks never hardcode
+    channel names or node prefixes; they call this function instead.
+
+    Returns a dict with four lists:
+      gpu_power : all keys matching *_gpu-N[W]  (wattage, any node)
+      cpu_power : all keys matching *_cpu-N[W]  (wattage, any node)
+      cpu_uj    : all keys matching *_cpu-N[uJ] (energy, any node)
+      gpu_temp  : all keys matching *_gpu-N[C]  (temperature, any node)
+    """
+    gpu_power, cpu_power, cpu_uj, gpu_temp = [], [], [], []
+
+    for key in record:
+        if not isinstance(key, str):
+            continue
+        key_lower = key.lower()
+
+        if key.endswith("[W]"):
+            if "gpu-" in key_lower:
+                gpu_power.append(key)
+            elif "cpu-" in key_lower:
+                cpu_power.append(key)
+
+        elif key.endswith("[uJ]"):
+            if "cpu-" in key_lower:
+                cpu_uj.append(key)
+
+        elif key.endswith("[C]"):
+            if "gpu-" in key_lower:
+                gpu_temp.append(key)
+
+    return {
+        "gpu_power": gpu_power,
+        "cpu_power": cpu_power,
+        "cpu_uj":    cpu_uj,
+        "gpu_temp":  gpu_temp,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal check classes -- ENF side
 # ---------------------------------------------------------------------------
 
 class _SequenceGuard:
@@ -155,18 +170,10 @@ class _SequenceGuard:
 
 class _ENFNominalRangeCheck:
     """
-    Confirms the RAW frequency value is physically plausible, before
-    any normalization happens.
-
-    This check exists because _ENFRangeCheck below only inspects the
-    normalized signature -- and normalization can absorb an extreme raw
-    value as the new local max/min without the resulting shape looking
-    abnormal at all. A single spike to 75 Hz, for example, just becomes
-    "the highest point in this window" after normalization; nothing in
-    the normalized signature reveals that 75 Hz is itself impossible on
-    a real power grid. This check catches that gap by looking at the
-    actual measurement, the same way _NLRRangeCheck checks raw GPU
-    wattage rather than some derived shape of it.
+    Confirms the RAW frequency value is physically plausible before
+    normalization. Normalization absorbs extreme values as the new local
+    max/min without the resulting shape looking abnormal, so this check
+    must run on the actual measurement, not the normalized signature.
     """
 
     def check(self, raw_frequency_hz: float) -> tuple[bool, str]:
@@ -175,51 +182,37 @@ class _ENFNominalRangeCheck:
             return False, (
                 f"OUT OF NOMINAL RANGE: raw frequency {raw_frequency_hz:.4f} Hz "
                 f"deviates {deviation:.4f} Hz from {NOMINAL_HZ} Hz nominal, "
-                f"exceeds tolerance {NOMINAL_TOLERANCE_HZ} Hz -- "
-                f"not physically plausible on a real power grid"
+                f"exceeds tolerance {NOMINAL_TOLERANCE_HZ} Hz"
             )
         return True, "ok"
 
 
 class _ENFRangeCheck:
     """
-    Confirms the anchor signature looks like real ENF.
-
-    Two failure modes:
-      Flat signature  -- all values identical (zero variance).
-                         Real ENF always has some fluctuation.
-                         A fabricated constant signal gets caught here.
-      Invalid values  -- any value outside [0, 1].
-                         Normalized values must always be in this range.
-                         A bug or corruption in the extractor shows here.
+    Confirms the normalized anchor signature looks like real ENF.
+    Catches flat signatures (zero variance) and out-of-[0,1] values.
     """
 
     def check(self, signature: list) -> tuple[bool, str]:
         if not signature:
             return False, "EMPTY SIGNATURE: anchor has no values"
-
         if any(v < 0.0 or v > 1.0 for v in signature):
             return False, "INVALID SIGNATURE: values outside normalized [0,1] range"
-
         unique = set(round(v, 8) for v in signature)
         if len(unique) == 1:
             return False, (
                 "FLAT SIGNATURE: zero variance -- "
                 "real ENF always fluctuates, this looks fabricated"
             )
-
         return True, "ok"
 
 
 class _ENFContinuityCheck:
     """
     Uses anchor.confidence as the continuity signal.
-
-    Confidence is the Pearson correlation between the current ENF window
-    and the previous one. On a real power grid this is always high because
-    mechanical turbine inertia prevents abrupt frequency jumps. A sudden
-    drop below the hard threshold means the ENF changed discontinuously,
-    which is physically impossible and signals injection or fabrication.
+    A sudden drop below the hard threshold means the ENF changed
+    discontinuously between windows, which is physically impossible
+    on a real grid and signals injection or fabrication.
     """
 
     def check(self, confidence: float) -> tuple[bool, str]:
@@ -235,13 +228,8 @@ class _ENFContinuityCheck:
 class _DriftMonitor:
     """
     One-sided CUSUM on (1 - confidence) as a deviation proxy.
-
-    Slow drift attacks keep each individual window just within the
-    per-window thresholds, so checks 1-3 pass every time. CUSUM catches
-    the drift by accumulating the directional bias across many windows.
-
-    When (1 - confidence) consistently exceeds the baseline, the CUSUM
-    sum grows until it crosses CUSUM_THRESHOLD and a DRIFT alert fires.
+    Catches slow drift attacks that keep each individual window within
+    per-window thresholds but accumulate a directional bias over time.
     """
 
     def __init__(self):
@@ -268,11 +256,7 @@ class _DriftMonitor:
         return self._cusum > CUSUM_THRESHOLD
 
     def calibrate(self) -> None:
-        """
-        Set baseline from current history.
-        Call after a clean warmup period before attack testing begins.
-        Resets CUSUM so warmup data does not pollute drift detection.
-        """
+        """Set baseline from current history after a clean warmup period."""
         if self._history:
             self._baseline = statistics.mean(self._history)
             self._cusum = 0.0
@@ -282,138 +266,143 @@ class _DriftMonitor:
 
 
 # ---------------------------------------------------------------------------
-# Internal check classes -- NLR side (new)
+# Internal check classes -- NLR side (multi-node aware)
 # ---------------------------------------------------------------------------
 
 class _NLRRangeCheck:
     """
     Confirms GPU and CPU power readings are physically plausible.
 
-    A reading above the hardware ceiling cannot occur on real hardware --
-    this mirrors the 800W cutoff already applied during ingestion in
-    data_loaders.py, applied again here as a verification-time check
-    in case Ethan's tampering reintroduces an impossible value after
-    ingestion already happened.
+    Discovers channel keys dynamically from the record so it works
+    for any number of nodes without any hardcoded column names.
+    A single-node record has 4 GPU wattage keys; a 16-node record
+    has 64. Both are checked with identical logic.
     """
 
     def check(self, record: dict) -> tuple[bool, str]:
-        gpu_channels = ["gpu-0[W]", "gpu-1[W]", "gpu-2[W]", "gpu-3[W]"]
-        cpu_channels = ["cpu-0[W]", "cpu-1[W]"]
+        channels = _find_nlr_keys(record)
 
-        for ch in gpu_channels:
-            val = record.get(ch)
-            if val is not None and val > GPU_POWER_CEILING_W:
+        for key in channels["gpu_power"]:
+            val = record.get(key)
+            if val is None:
+                continue
+            if val < 0:
+                return False, f"OUT OF RANGE: {key}={val:.2f}W is negative"
+            if val > GPU_POWER_CEILING_W:
                 return False, (
-                    f"OUT OF RANGE: {ch}={val:.2f}W exceeds hardware "
+                    f"OUT OF RANGE: {key}={val:.2f}W exceeds hardware "
                     f"ceiling {GPU_POWER_CEILING_W}W"
                 )
-            if val is not None and val < 0:
-                return False, f"OUT OF RANGE: {ch}={val:.2f}W is negative"
 
-        for ch in cpu_channels:
-            val = record.get(ch)
-            if val is not None and val > CPU_POWER_CEILING_W:
+        for key in channels["cpu_power"]:
+            val = record.get(key)
+            if val is None:
+                continue
+            if val < 0:
+                return False, f"OUT OF RANGE: {key}={val:.2f}W is negative"
+            if val > CPU_POWER_CEILING_W:
                 return False, (
-                    f"OUT OF RANGE: {ch}={val:.2f}W exceeds hardware "
+                    f"OUT OF RANGE: {key}={val:.2f}W exceeds hardware "
                     f"ceiling {CPU_POWER_CEILING_W}W"
                 )
-            if val is not None and val < 0:
-                return False, f"OUT OF RANGE: {ch}={val:.2f}W is negative"
 
         return True, "ok"
 
 
 class _NLRContinuityCheck:
     """
-    Confirms GPU/CPU power does not jump implausibly between consecutive
-    aggregated windows (each window = 2 seconds of real time).
+    Confirms GPU and CPU power does not jump implausibly between
+    consecutive aggregated windows.
 
-    Real GPU power under sustained workload ramps gradually -- a sudden
-    spike or drop far beyond the observed P99 step size in clean data
-    indicates an injected or fabricated reading rather than genuine
-    workload variation.
-
-    Maintains separate previous-value state per channel so it can be
-    called once per record with all channels checked together.
+    Maintains previous-value state keyed by the full column name
+    (e.g. "x3105c0s41b0n0_gpu-0[W]"). Since each node's columns
+    have a unique prefix, there is no collision between nodes and
+    no changes are needed to support multi-node configurations --
+    the dict naturally tracks all nodes independently.
     """
 
     def __init__(self):
-        self._prev: dict = {}
+        self._prev: dict[str, float] = {}
 
     def check(self, record: dict) -> tuple[bool, str]:
-        channels = {
-            "gpu-0[W]": GPU_MAX_STEP_W, "gpu-1[W]": GPU_MAX_STEP_W,
-            "gpu-2[W]": GPU_MAX_STEP_W, "gpu-3[W]": GPU_MAX_STEP_W,
-            "cpu-0[W]": CPU_MAX_STEP_W, "cpu-1[W]": CPU_MAX_STEP_W,
-        }
+        channels = _find_nlr_keys(record)
 
-        for ch, max_step in channels.items():
-            val = record.get(ch)
+        for key in channels["gpu_power"]:
+            val = record.get(key)
             if val is None:
                 continue
-
-            prev_val = self._prev.get(ch)
-            if prev_val is not None:
-                step = abs(val - prev_val)
-                if step > max_step:
-                    self._prev[ch] = val  # still update so we don't cascade-fail
+            prev = self._prev.get(key)
+            if prev is not None:
+                step = abs(val - prev)
+                if step > GPU_MAX_STEP_W:
+                    self._prev[key] = val
                     return False, (
-                        f"DISCONTINUITY: {ch} stepped {step:.2f}W between "
-                        f"windows, exceeds max plausible step {max_step}W"
+                        f"DISCONTINUITY: {key} stepped {step:.2f}W between "
+                        f"windows, exceeds max plausible step {GPU_MAX_STEP_W}W"
                     )
+            self._prev[key] = val
 
-            self._prev[ch] = val
+        for key in channels["cpu_power"]:
+            val = record.get(key)
+            if val is None:
+                continue
+            prev = self._prev.get(key)
+            if prev is not None:
+                step = abs(val - prev)
+                if step > CPU_MAX_STEP_W:
+                    self._prev[key] = val
+                    return False, (
+                        f"DISCONTINUITY: {key} stepped {step:.2f}W between "
+                        f"windows, exceeds max plausible step {CPU_MAX_STEP_W}W"
+                    )
+            self._prev[key] = val
 
         return True, "ok"
 
     def reset(self) -> None:
-        self._prev = {}
+        self._prev.clear()
 
 
 class _NLRMonotonicityCheck:
     """
     Confirms CPU energy counters (uJ) only increase, except for known
-    hardware wraparounds.
+    RAPL hardware wraparounds (~65.5 billion uJ drop).
 
-    RAPL energy counters are fixed-width hardware registers. They wrap
-    to near-zero when they overflow -- observed wrap magnitude in real
-    data is consistently ~65.5 billion uJ. A decrease of any OTHER size
-    is not explainable by hardware behavior and indicates the value was
-    tampered with or fabricated.
+    Like _NLRContinuityCheck, state is keyed by the full prefixed
+    column name so all nodes are tracked independently with no
+    code changes required as node count varies.
     """
 
     def __init__(self):
-        self._prev: dict = {}
+        self._prev: dict[str, float] = {}
 
     def check(self, record: dict) -> tuple[bool, str]:
-        channels = ["cpu-0[uJ]", "cpu-1[uJ]"]
+        channels = _find_nlr_keys(record)
 
-        for ch in channels:
-            val = record.get(ch)
+        for key in channels["cpu_uj"]:
+            val = record.get(key)
             if val is None:
                 continue
-
-            prev_val = self._prev.get(ch)
-            if prev_val is not None and val < prev_val:
-                drop = prev_val - val
+            prev = self._prev.get(key)
+            if prev is not None and val < prev:
+                drop = prev - val
                 is_expected_wrap = (
                     abs(drop - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
                 )
                 if not is_expected_wrap:
-                    self._prev[ch] = val
+                    self._prev[key] = val
                     return False, (
-                        f"MONOTONICITY VIOLATION: {ch} decreased by "
-                        f"{drop:.1f} uJ, not consistent with a known "
-                        f"hardware wrap (~{CPU_UJ_WRAP_CEILING:.0f} uJ) -- "
-                        f"counter should only increase or wrap"
+                        f"MONOTONICITY VIOLATION: {key} decreased by "
+                        f"{drop:.1f} uJ -- not consistent with known hardware "
+                        f"wrap (~{CPU_UJ_WRAP_CEILING:.0f} uJ). "
+                        f"Counter should only increase or wrap."
                     )
-
-            self._prev[ch] = val
+            self._prev[key] = val
 
         return True, "ok"
 
     def reset(self) -> None:
-        self._prev = {}
+        self._prev.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -424,31 +413,24 @@ class Verifier:
     """
     Runs all ENF and NLR checks for every (sample, anchor) pair.
 
+    Fully multi-node aware: the NLR checks discover channel names
+    dynamically from the record so they work identically for 1 node
+    or 16 nodes with no configuration required.
+
     Parameters
     ----------
     component_id : str
-    
         Twin component being verified e.g. "rack_00".
         Must match Hendricks' StateVariable.source_object and
-        Marchisano's AttackEvent.target_component so metrics.score()
-        can correctly classify true positives.
-        
+        Marchisano's AttackEvent.target_component.
     warmup_windows : int
-    
         Clean windows before drift baseline is calibrated.
         Keep below the earliest possible attack start.
-        
     strict_ordering : bool
-    
         Enforce strictly increasing timestamps.
-        True catches out-of-order replays.
-        False catches only exact duplicate timestamps.
-        
     check_nlr : bool
-    
-        Whether to run the NLR checks at all. Default True. Set False
-        if a given run has no NLR fields available on the sample
-        (e.g. ENF-only testing).
+        Whether to run the NLR checks. Default True.
+        Set False for ENF-only testing.
     """
 
     def __init__(
@@ -469,14 +451,12 @@ class Verifier:
         self._continuity_check    = _ENFContinuityCheck()
         self._drift_monitor       = _DriftMonitor()
 
-        # NLR checks
-        self._nlr_range_check       = _NLRRangeCheck()
-        self._nlr_continuity_check  = _NLRContinuityCheck()
+        # NLR checks -- multi-node aware, no configuration needed
+        self._nlr_range_check        = _NLRRangeCheck()
+        self._nlr_continuity_check   = _NLRContinuityCheck()
         self._nlr_monotonicity_check = _NLRMonotonicityCheck()
 
         self._windows_processed: int = 0
-
-    # --- getters ---------------------------------------------------------------
 
     @property
     def component_id(self) -> str:
@@ -486,38 +466,28 @@ class Verifier:
     def windows_processed(self) -> int:
         return self._windows_processed
 
-    # --- public API ------------------------------------------------------------
-
     def verify(self, sample, anchor: AnchorRecord) -> VerificationResult:
         """
         Verify one sample against its anchor.
 
         Parameters
         ----------
-        sample : PowerSample, StateVariable, or dict
-            Claimed twin state for this time step.
-            Must have a .timestamp attribute (float, elapsed seconds)
-            for the ENF checks. For NLR checks, must also expose the
-            combined record's GPU/CPU fields -- either as a dict via
-            sample (if sample IS the combined dict from
-            build_combined_records), or via attribute access matching
-            the same field names.
-            
+        sample : dict or object with .timestamp
+            Combined record from read_combined_jsonl() (post-Ethan),
+            or a PowerSample / StateVariable object.
+            For dict input: must have "index" or "timestamp" key.
+            NLR checks use whatever node-prefixed channel keys are
+            present -- no configuration required for multi-node.
         anchor : AnchorRecord
-            ENF anchor from AnchorExtractor.extract() at same timestamp.
-
-        Returns
-        -------
-        VerificationResult
-            All fields match microverse_core.contracts exactly.
-            Only FAILED status counts as a detection in metrics.score().
+            ENF anchor from AnchorExtractor.extract() for same timestamp.
         """
+        # extract timestamp
         if hasattr(sample, "timestamp"):
             ts = sample.timestamp
         elif isinstance(sample, dict):
-            ts = sample.get("timestamp", sample.get("index", 0))
+            ts = float(sample.get("timestamp", sample.get("index", 0)))
         else:
-            ts = 0
+            ts = 0.0
 
         # ----------------------------------------------------------------
         # Check 1: Sequence guard -- replay defense
@@ -530,18 +500,14 @@ class Verifier:
             )
 
         # ----------------------------------------------------------------
-        # Check 2: ENF nominal range check -- raw value injection defense
-        # Reads the RAW frequency, not the normalized signature, so an
-        # extreme single-sample spike can't hide by becoming the new
-        # local max/min after normalization. Only runs if the raw value
-        # is available on the sample (dict with "FRQ", or an object
-        # exposing frequency_hz / FRQ as an attribute).
+        # Check 2: ENF nominal range -- raw frequency injection defense
         # ----------------------------------------------------------------
         raw_freq = None
         if isinstance(sample, dict):
             raw_freq = sample.get("FRQ", sample.get("frequency_hz"))
         else:
-            raw_freq = getattr(sample, "FRQ", getattr(sample, "frequency_hz", None))
+            raw_freq = getattr(sample, "FRQ",
+                       getattr(sample, "frequency_hz", None))
 
         if raw_freq is not None:
             passed, reason = self._nominal_range_check.check(raw_freq)
@@ -552,7 +518,7 @@ class Verifier:
                 )
 
         # ----------------------------------------------------------------
-        # Check 2: ENF range check -- injection defense
+        # Check 3: ENF signature range -- normalized shape check
         # ----------------------------------------------------------------
         passed, reason = self._range_check.check(anchor.signature)
         if not passed:
@@ -562,7 +528,7 @@ class Verifier:
             )
 
         # ----------------------------------------------------------------
-        # Check 3: ENF continuity check -- discontinuity defense
+        # Check 4: ENF continuity -- confidence hard threshold
         # ----------------------------------------------------------------
         passed, reason = self._continuity_check.check(anchor.confidence)
         if not passed:
@@ -572,10 +538,13 @@ class Verifier:
             )
 
         # ----------------------------------------------------------------
-        # NLR checks 5-7 -- only run if the sample carries NLR fields
+        # Checks 6-8: NLR checks -- multi-node, dynamic channel discovery
         # ----------------------------------------------------------------
         if self._check_nlr:
-            record_dict = sample if isinstance(sample, dict) else getattr(sample, "__dict__", {})
+            record_dict = (
+                sample if isinstance(sample, dict)
+                else getattr(sample, "__dict__", {})
+            )
 
             passed, reason = self._nlr_range_check.check(record_dict)
             if not passed:
@@ -599,9 +568,7 @@ class Verifier:
                 )
 
         # ----------------------------------------------------------------
-        # Check 4: Drift monitor -- slow drift defense via CUSUM
-        # Record confidence before checking so monitor accumulates
-        # even on windows that passed the per-window checks above
+        # Check 5: Drift monitor -- slow drift via CUSUM
         # ----------------------------------------------------------------
         self._drift_monitor.record(anchor.confidence)
         self._windows_processed += 1
@@ -627,7 +594,7 @@ class Verifier:
             )
 
         # ----------------------------------------------------------------
-        # All checks passed -- assign TRUSTED or SUSPECT
+        # All checks passed
         # ----------------------------------------------------------------
         if anchor.confidence >= CONFIDENCE_TRUSTED:
             return self._make_result(
@@ -642,8 +609,6 @@ class Verifier:
                 f"normal threshold {CONFIDENCE_TRUSTED} -- monitoring"
             )
 
-    # --- private helper --------------------------------------------------------
-
     def _make_result(
         self,
         timestamp: float,
@@ -652,7 +617,6 @@ class Verifier:
         score: float,
         reason: str,
     ) -> VerificationResult:
-        """Instantiates VerificationResult with exact contract field names."""
         return VerificationResult(
             timestamp=timestamp,
             component_id=self._component_id,
