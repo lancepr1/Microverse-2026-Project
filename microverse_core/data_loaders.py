@@ -6,21 +6,34 @@ Two real datasets feed this project:
     5 to 10 Hz, per-node and whole-facility, real LLM and image-gen workloads.
   - The 2025 ENF measurements collected at AFRL Rome (from the lab / Dr. Qu).
 
-Neither ships in this repo (see data/README.md). The real loaders below are
+Neither ships in the repo (see data/README.md). The real loaders below are
 deliberately thin and marked TODO, because the exact column names live in each
 dataset's own README and should be confirmed in week one rather than guessed.
 
 Until the team has the real files, the synthetic_* generators produce
 plausible-shaped traces so every lane can develop and run the smoke test on
-day one. They are NOT a research artifact: swap in the real data before any
+day one. They are NOT a research artifact: swap in real data before any
 result goes in the paper.
 
 Pipeline (Leiva's ingestion path):
-    load_enf()          ENF CSV -> list[float], 1800 readings at 0.5 Hz
-    load_nlr()           NVML + RAPL .log -> aggregated 0.5 Hz windows
-    build_combined_records()  merges ENF + GPU + CPU into one record per index
-    write_combined_jsonl()    writes the merged records to JSONL, one line
-                              per index, for Ethan's attack module to consume
+    load_enf()               ENF CSV -> list[float], 1800 readings at 0.5 Hz
+    discover_nlr_pairs()     scans a flat folder, pairs NVML+RAPL by node name
+                             works for any number of nodes (1 to 16+)
+    load_nlr_multi()         loads all pairs, auto-detects sample rate,
+                             prefixes columns with node name
+    build_combined_records() merges ENF + all node windows into one record
+                             per index. If NLR is shorter than ENF, pads
+                             the last real NLR reading to fill the gap.
+    write_combined_jsonl()   writes merged records to JSONL for Ethan
+    read_combined_jsonl()    generator that yields one record at a time
+
+Combined record header order (node-grouped, Option A):
+    index, FRQ,
+    {node_id}_gpu-0[W] .. {node_id}_gpu-3[W],
+    {node_id}_gpu-0[C] .. {node_id}_gpu-3[C],
+    {node_id}_cpu-0[uJ] .. {node_id}_cpu-1-core[uJ],
+    {node_id}_cpu-0[W] .. {node_id}_cpu-1-core[W],
+    (repeated for each node in sorted order)
 """
 from __future__ import annotations
 
@@ -28,7 +41,9 @@ import csv
 import json
 import math
 import random
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -73,6 +88,7 @@ def load_enf(path: str) -> list[float]:
 
     Sample rate: 1800 samples / 3600 seconds = 0.5 Hz
     Returns a list of 1800 floats ordered by ascending index.
+    ENF is grid-wide -- one file covers all nodes simultaneously.
     """
     values: list[float] = []
     with open(path, newline="") as fh:
@@ -82,29 +98,45 @@ def load_enf(path: str) -> list[float]:
             if not row:
                 continue
             try:
-                values.append(float(row[1]))  # col 0 is index, col 1 is frequency
+                values.append(float(row[1]))
             except (ValueError, IndexError):
                 continue
     return values
 
 
 # --------------------------------------------------------------------------
-# NLR wattmeter log loaders (Leiva)
-# Reads NVML (.log) and RAPL (.log) files, aggregates from 10 Hz to 0.5 Hz
-# to match the ENF sample rate. Output window index aligns with ENF index.
+# NLR wattmeter log loaders -- multi-node aware, variable sample rate
+#
+# File naming convention:
+#   nvml_wattameter_emissions_parsed_slurmid_{id}_node_{node_id}.log
+#   rapl_wattameter_emissions_parsed_slurmid_{id}_node_{node_id}.log
+#
+# Sample rates vary by workload:
+#   training workloads  ->  5 Hz  (10 samples per 2-second ENF window)
+#   inference workloads -> 10 Hz  (20 samples per 2-second ENF window)
+#
+# load_nlr_multi() auto-detects the sample rate from the first file
+# and computes the correct samples_per_window automatically.
 # --------------------------------------------------------------------------
 
-# 10 Hz NLR / 0.5 Hz ENF = 20 raw samples per aggregated window
-_NLR_SAMPLES_PER_WINDOW = 20
-
-# Cap at 1800 windows to match one hour of ENF data (indices 0-1799)
 _NLR_MAX_WINDOWS = 1800
+_NLR_DATETIME_FORMAT = "%Y-%m-%d_%H:%M:%S.%f"
+
+# Regex patterns for node ID and SLURM ID extraction
+_NODE_ID_PATTERN_NEW = re.compile(r'node_([^.]+)\.log$', re.IGNORECASE)
+_NODE_ID_PATTERN_OLD = re.compile(r'wattameter_([^.]+)\.log$', re.IGNORECASE)
+_SLURM_ID_PATTERN   = re.compile(r'slurmid_(\d+)', re.IGNORECASE)
+
+# Device power limits -- readings above these are hardware errors
+_GPU_LIMIT_W = 800.0
+_CPU_LIMIT_W = 800.0
 
 
 @dataclass
 class AggregatedGPUWindow:
     """
-    One 2-second window of GPU telemetry averaged across 20 raw samples.
+    One ENF-aligned window of GPU telemetry averaged across N raw samples.
+    N = nlr_sample_rate_hz * enf_window_seconds (e.g. 10 at 5Hz, 20 at 10Hz).
     Column names match the original NVML log header exactly.
     index aligns with the ENF list index for the same time window.
     """
@@ -118,23 +150,24 @@ class AggregatedGPUWindow:
     gpu2_c: float   # gpu-2[C]
     gpu3_c: float   # gpu-3[C]
 
-    def to_dict(self) -> dict:
+    def to_dict(self, prefix: str = "") -> dict:
+        p = prefix
         return {
-            "gpu-0[W]": round(self.gpu0_w, 4),
-            "gpu-1[W]": round(self.gpu1_w, 4),
-            "gpu-2[W]": round(self.gpu2_w, 4),
-            "gpu-3[W]": round(self.gpu3_w, 4),
-            "gpu-0[C]": round(self.gpu0_c, 4),
-            "gpu-1[C]": round(self.gpu1_c, 4),
-            "gpu-2[C]": round(self.gpu2_c, 4),
-            "gpu-3[C]": round(self.gpu3_c, 4),
+            f"{p}gpu-0[W]": round(self.gpu0_w, 4),
+            f"{p}gpu-1[W]": round(self.gpu1_w, 4),
+            f"{p}gpu-2[W]": round(self.gpu2_w, 4),
+            f"{p}gpu-3[W]": round(self.gpu3_w, 4),
+            f"{p}gpu-0[C]": round(self.gpu0_c, 4),
+            f"{p}gpu-1[C]": round(self.gpu1_c, 4),
+            f"{p}gpu-2[C]": round(self.gpu2_c, 4),
+            f"{p}gpu-3[C]": round(self.gpu3_c, 4),
         }
 
 
 @dataclass
 class AggregatedCPUWindow:
     """
-    One 2-second window of CPU telemetry averaged across 20 raw samples.
+    One ENF-aligned window of CPU telemetry averaged across N raw samples.
     Column names match the original RAPL log header exactly.
     index aligns with the ENF list index for the same time window.
     """
@@ -148,16 +181,17 @@ class AggregatedCPUWindow:
     cpu1_w:       float   # cpu-1[W]
     cpu1_core_w:  float   # cpu-1-core[W]
 
-    def to_dict(self) -> dict:
+    def to_dict(self, prefix: str = "") -> dict:
+        p = prefix
         return {
-            "cpu-0[uJ]":      round(self.cpu0_uj, 4),
-            "cpu-0-core[uJ]": round(self.cpu0_core_uj, 4),
-            "cpu-1[uJ]":      round(self.cpu1_uj, 4),
-            "cpu-1-core[uJ]": round(self.cpu1_core_uj, 4),
-            "cpu-0[W]":       round(self.cpu0_w, 4),
-            "cpu-0-core[W]":  round(self.cpu0_core_w, 4),
-            "cpu-1[W]":       round(self.cpu1_w, 4),
-            "cpu-1-core[W]":  round(self.cpu1_core_w, 4),
+            f"{p}cpu-0[uJ]":      round(self.cpu0_uj, 4),
+            f"{p}cpu-0-core[uJ]": round(self.cpu0_core_uj, 4),
+            f"{p}cpu-1[uJ]":      round(self.cpu1_uj, 4),
+            f"{p}cpu-1-core[uJ]": round(self.cpu1_core_uj, 4),
+            f"{p}cpu-0[W]":       round(self.cpu0_w, 4),
+            f"{p}cpu-0-core[W]":  round(self.cpu0_core_w, 4),
+            f"{p}cpu-1[W]":       round(self.cpu1_w, 4),
+            f"{p}cpu-1-core[W]":  round(self.cpu1_core_w, 4),
         }
 
 
@@ -195,14 +229,215 @@ def _nlr_mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _extract_node_id(filename: str) -> Optional[str]:
+    """
+    Extracts the node identifier from a wattmeter log filename.
+
+    Handles two naming conventions:
+      New: nvml_wattameter_emissions_parsed_slurmid_10742842_node_x3105c0s41b0n0.log
+             -> "x3105c0s41b0n0"
+      Old: nvml_wattameter_x3115c0s33b0n0.log
+             -> "x3115c0s33b0n0"
+    """
+    name = Path(filename).name
+    m = _NODE_ID_PATTERN_NEW.search(name)
+    if m:
+        return m.group(1)
+    m = _NODE_ID_PATTERN_OLD.search(name)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _detect_sample_rate_hz(path: str, n_samples: int = 30) -> float:
+    """
+    Auto-detect NLR sample rate from the first n_samples timestamps.
+
+    Reads only the first n_samples data rows so it stays fast on large
+    files. Returns rate rounded to the nearest integer Hz.
+
+    Training workloads  ->  5 Hz
+    Inference workloads -> 10 Hz
+    """
+    timestamps = []
+    with open(path) as fh:
+        for line in fh:
+            if len(timestamps) >= n_samples:
+                break
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split()
+            try:
+                ts = datetime.strptime(parts[0], _NLR_DATETIME_FORMAT)
+                timestamps.append(ts)
+            except (ValueError, IndexError):
+                continue
+
+    if len(timestamps) < 2:
+        raise RuntimeError(
+            f"[detect_sample_rate] could not detect rate from {path} -- "
+            f"fewer than 2 readable timestamps found"
+        )
+
+    intervals = [
+        (timestamps[i + 1] - timestamps[i]).total_seconds()
+        for i in range(len(timestamps) - 1)
+    ]
+    mean_interval = sum(intervals) / len(intervals)
+    detected_hz = round(1.0 / mean_interval)
+
+    print(f"[detect_sample_rate] {Path(path).name}: "
+          f"mean interval={mean_interval * 1000:.1f}ms "
+          f"-> {detected_hz} Hz")
+
+    return float(detected_hz)
+
+
+def _pad_windows(
+    windows: list,
+    target_length: int,
+    label: str = "",
+) -> list:
+    """
+    Pads a window list to target_length by repeating the last window.
+
+    If the NLR recording is shorter than the ENF file (e.g. a training
+    run that lasted 17 minutes against a 1-hour ENF file), this fills
+    the gap by holding the last real reading rather than crashing or
+    producing empty records. The padded windows are flagged with a
+    different index so downstream consumers can identify them if needed.
+
+    If windows is empty, returns an empty list (cannot pad nothing).
+    """
+    if not windows or len(windows) >= target_length:
+        return windows
+
+    n_real = len(windows)
+    n_pad  = target_length - n_real
+    last   = windows[-1]
+
+    print(f"[pad_windows] {label}: {n_real} real windows, "
+          f"padding {n_pad} with last reading to reach {target_length}")
+
+    padded = list(windows)
+    for extra_idx in range(n_real, target_length):
+        import copy
+        w = copy.copy(last)
+        w.index = extra_idx
+        padded.append(w)
+
+    return padded
+
+
+def discover_nlr_pairs(
+    folder: str,
+    slurm_id: Optional[str] = None,
+) -> list[tuple[str, str, str]]:
+    """
+    Scans a flat folder for NVML and RAPL log file pairs, matching them
+    by the shared node identifier in their filenames.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the flat folder containing all .log files.
+    slurm_id : str, optional
+        If provided, only files whose filename contains
+        "slurmid_{slurm_id}" are considered. Use this when a folder
+        contains multiple hours of data (each hour has a different
+        SLURM job ID) and you want to ingest one specific hour.
+
+        Example -- folder contains 2 hours for 16 nodes (64 files):
+            pairs_h1 = discover_nlr_pairs("data/raw/", slurm_id="10742842")
+            pairs_h2 = discover_nlr_pairs("data/raw/", slurm_id="10742844")
+
+    Returns
+    -------
+    list of (node_id, nvml_path, rapl_path) tuples sorted by node_id.
+
+    Raises ValueError if any node has NVML but no RAPL, or vice versa,
+    or if duplicate nodes are found without a slurm_id filter.
+    """
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        raise FileNotFoundError(f"NLR folder not found: {folder}")
+
+    nvml_files: dict[str, Path] = {}
+    rapl_files: dict[str, Path] = {}
+
+    for f in folder_path.iterdir():
+        if f.suffix.lower() != ".log":
+            continue
+
+        if slurm_id is not None:
+            m = _SLURM_ID_PATTERN.search(f.name)
+            if not m or m.group(1) != str(slurm_id):
+                continue
+
+        node_id = _extract_node_id(f.name)
+        if node_id is None:
+            continue
+
+        name_lower = f.name.lower()
+        if "nvml" in name_lower:
+            if node_id in nvml_files:
+                raise ValueError(
+                    f"Duplicate NVML file for node {node_id}:\n"
+                    f"  existing: {nvml_files[node_id].name}\n"
+                    f"  new:      {f.name}\n"
+                    f"Hint: use the slurm_id parameter to filter by "
+                    f"a specific hour."
+                )
+            nvml_files[node_id] = f
+        elif "rapl" in name_lower:
+            if node_id in rapl_files:
+                raise ValueError(
+                    f"Duplicate RAPL file for node {node_id}:\n"
+                    f"  existing: {rapl_files[node_id].name}\n"
+                    f"  new:      {f.name}\n"
+                    f"Hint: use the slurm_id parameter to filter by "
+                    f"a specific hour."
+                )
+            rapl_files[node_id] = f
+
+    nvml_only = set(nvml_files) - set(rapl_files)
+    rapl_only = set(rapl_files) - set(nvml_files)
+    if nvml_only:
+        raise ValueError(
+            f"NVML files with no matching RAPL for nodes: {sorted(nvml_only)}"
+        )
+    if rapl_only:
+        raise ValueError(
+            f"RAPL files with no matching NVML for nodes: {sorted(rapl_only)}"
+        )
+
+    paired = [
+        (node_id, str(nvml_files[node_id]), str(rapl_files[node_id]))
+        for node_id in sorted(nvml_files.keys())
+    ]
+
+    if not paired:
+        hint = f" with slurm_id='{slurm_id}'" if slurm_id else ""
+        raise ValueError(
+            f"No NVML/RAPL pairs found in {folder}{hint}. "
+            f"Filenames must contain 'nvml' or 'rapl' and end with "
+            f"'node_{{node_id}}.log' or 'wattameter_{{node_id}}.log'"
+        )
+
+    print(f"[discover_nlr_pairs] found {len(paired)} node pair(s)"
+          + (f" for slurm_id={slurm_id}" if slurm_id else "")
+          + f": {[p[0] for p in paired]}")
+
+    return paired
+
+
 def _parse_nvml_log(
     path: str,
     max_rows: Optional[int] = None,
 ) -> list[_RawGPURow]:
-    """Parse NVML wattmeter .log into raw GPU rows, optionally capped."""
     rows: list[_RawGPURow] = []
     header: list[str] = []
-
     with open(path) as fh:
         for line in fh:
             if max_rows is not None and len(rows) >= max_rows:
@@ -231,7 +466,8 @@ def _parse_nvml_log(
                 gpu3_c  = float(col["gpu-3[C]"])
             except (KeyError, ValueError):
                 continue
-            if any(v * 1e-3 > 800 for v in [gpu0_mw, gpu1_mw, gpu2_mw, gpu3_mw]):
+            if any(v * 1e-3 > _GPU_LIMIT_W
+                   for v in [gpu0_mw, gpu1_mw, gpu2_mw, gpu3_mw]):
                 continue
             rows.append(_RawGPURow(
                 gpu0_mw=gpu0_mw, gpu1_mw=gpu1_mw,
@@ -246,10 +482,8 @@ def _parse_rapl_log(
     path: str,
     max_rows: Optional[int] = None,
 ) -> list[_RawCPURow]:
-    """Parse RAPL wattmeter .log into raw CPU rows, optionally capped."""
     rows: list[_RawCPURow] = []
     header: list[str] = []
-
     with open(path) as fh:
         for line in fh:
             if max_rows is not None and len(rows) >= max_rows:
@@ -278,7 +512,7 @@ def _parse_rapl_log(
                 cpu1_core_w  = float(col["cpu-1-core[W]"])
             except (KeyError, ValueError):
                 continue
-            if any(v > 800 for v in [cpu0_w, cpu1_w]):
+            if any(v > _CPU_LIMIT_W for v in [cpu0_w, cpu1_w]):
                 continue
             rows.append(_RawCPURow(
                 cpu0_uj=cpu0_uj,           cpu0_core_uj=cpu0_core_uj,
@@ -291,9 +525,8 @@ def _parse_rapl_log(
 
 def _aggregate_gpu(
     rows: list[_RawGPURow],
-    samples_per_window: int = _NLR_SAMPLES_PER_WINDOW,
+    samples_per_window: int,
 ) -> list[AggregatedGPUWindow]:
-    """Average groups of raw GPU rows. Converts mW to W during averaging."""
     windows = []
     for start in range(0, len(rows), samples_per_window):
         group = rows[start: start + samples_per_window]
@@ -315,9 +548,8 @@ def _aggregate_gpu(
 
 def _aggregate_cpu(
     rows: list[_RawCPURow],
-    samples_per_window: int = _NLR_SAMPLES_PER_WINDOW,
+    samples_per_window: int,
 ) -> list[AggregatedCPUWindow]:
-    """Average groups of raw CPU rows. Both uJ and W columns averaged."""
     windows = []
     for start in range(0, len(rows), samples_per_window):
         group = rows[start: start + samples_per_window]
@@ -337,86 +569,148 @@ def _aggregate_cpu(
     return windows
 
 
-def load_nlr(
-    nvml_path: str,
-    rapl_path: str,
-    samples_per_window: int = _NLR_SAMPLES_PER_WINDOW,
+def load_nlr_multi(
+    pairs: list[tuple[str, str, str]],
+    nlr_sample_rate_hz: Optional[float] = None,
+    enf_sample_rate_hz: float = 0.5,
     max_windows: int = _NLR_MAX_WINDOWS,
-) -> tuple[list[AggregatedGPUWindow], list[AggregatedCPUWindow]]:
+) -> dict[str, tuple[list[AggregatedGPUWindow], list[AggregatedCPUWindow]]]:
     """
-    Load and aggregate both NLR wattmeter logs into 1800 windows each,
-    aligned to ENF indices 0-1799.
+    Load and aggregate all node pairs returned by discover_nlr_pairs().
 
-    Reads only the first 36,000 raw rows from each file
-    (1800 windows x 20 samples) and discards the rest.
+    Auto-detects the NLR sample rate from the first file so the correct
+    number of raw samples are averaged per ENF-aligned window:
+        training workloads  ->  5 Hz ->  10 samples per window
+        inference workloads -> 10 Hz ->  20 samples per window
+
+    Parameters
+    ----------
+    pairs : list of (node_id, nvml_path, rapl_path) tuples
+    nlr_sample_rate_hz : float, optional
+        Override auto-detection. Pass 5.0 or 10.0 explicitly if needed.
+    enf_sample_rate_hz : float
+        ENF sample rate in Hz (default 0.5). Sets the window duration.
+    max_windows : int
+        Max windows per node (default 1800 = 1 hour at 0.5 Hz).
+        Windows are padded to this length in build_combined_records if
+        the recording is shorter.
     """
+    if not pairs:
+        raise ValueError("No node pairs provided")
+
+    # auto-detect sample rate from the first NVML file
+    if nlr_sample_rate_hz is None:
+        nlr_sample_rate_hz = _detect_sample_rate_hz(pairs[0][1])
+
+    enf_window_seconds = 1.0 / enf_sample_rate_hz  # 2.0s at 0.5 Hz
+    samples_per_window = round(nlr_sample_rate_hz * enf_window_seconds)
     max_raw = max_windows * samples_per_window
 
-    raw_gpu = _parse_nvml_log(nvml_path, max_rows=max_raw)
-    raw_cpu = _parse_rapl_log(rapl_path, max_rows=max_raw)
+    print(f"[load_nlr_multi] NLR={nlr_sample_rate_hz:.0f} Hz, "
+          f"ENF={enf_sample_rate_hz} Hz -> "
+          f"{samples_per_window} samples per window")
 
-    gpu_windows = _aggregate_gpu(raw_gpu, samples_per_window)[:max_windows]
-    cpu_windows = _aggregate_cpu(raw_cpu, samples_per_window)[:max_windows]
+    node_windows: dict[str, tuple] = {}
+    for node_id, nvml_path, rapl_path in pairs:
+        print(f"[nlr_ingest] loading node {node_id}")
+        raw_gpu = _parse_nvml_log(nvml_path, max_rows=max_raw)
+        raw_cpu = _parse_rapl_log(rapl_path, max_rows=max_raw)
+        gpu_windows = _aggregate_gpu(raw_gpu, samples_per_window)[:max_windows]
+        cpu_windows = _aggregate_cpu(raw_cpu, samples_per_window)[:max_windows]
+        print(f"  -> {len(gpu_windows)} GPU windows, "
+              f"{len(cpu_windows)} CPU windows")
+        node_windows[node_id] = (gpu_windows, cpu_windows)
 
-    return gpu_windows, cpu_windows
+    print(f"[nlr_ingest] loaded {len(node_windows)} node(s): "
+          f"{list(node_windows.keys())}")
+    return node_windows
 
 
 # --------------------------------------------------------------------------
-# Combined record builder + JSONL writer
-# Merges ENF + GPU + CPU into one record per index:
-#   index, FRQ, gpu-0[W] .. gpu-3[C], cpu-0[uJ] .. cpu-1-core[W]
-# This is the file handed to Ethan, and the file he hands back for
-# verification.
+# Combined record builder
 # --------------------------------------------------------------------------
 
 def build_combined_records(
     enf: list[float],
-    gpu_windows: list[AggregatedGPUWindow],
-    cpu_windows: list[AggregatedCPUWindow],
+    node_windows: dict[str, tuple[
+        list[AggregatedGPUWindow], list[AggregatedCPUWindow]
+    ]],
+    pad_short_nlr: bool = True,
 ) -> list[dict]:
     """
-    Merge ENF, GPU, and CPU data into one flat dict per index.
+    Merge ENF and all node windows into one flat dict per index.
 
-    Header order: index, FRQ, then all GPU columns, then all CPU columns.
+    If the NLR recording is shorter than the ENF file (e.g. a training
+    run that lasted 17 minutes against a 1-hour ENF file), the behaviour
+    depends on pad_short_nlr:
 
-    Requires all three inputs to have the same length (1800 entries each
-    when using the default max_windows). Raises if they do not match,
-    since silently truncating to the shortest list would misalign the
-    ENF anchor from its corresponding power readings.
+        True (default): pad each short node's windows by repeating the
+            last real reading until it matches the ENF length. The twin
+            keeps displaying the last known hardware state rather than
+            going blank, and the simulation continues uninterrupted.
+
+        False: trim ENF to the shortest node's window count instead.
+            Use this when you only want real data, no padding.
+
+    Never crashes on a length mismatch -- always produces a complete
+    list of records the same length as the ENF file (or the shortest
+    NLR window count when pad_short_nlr=False).
+
+    Parameters
+    ----------
+    enf : list[float]
+        ENF frequency readings from load_enf().
+    node_windows : dict
+        As returned by load_nlr_multi().
+    pad_short_nlr : bool
+        Whether to pad short NLR data to match ENF length (default True).
     """
-    n_enf, n_gpu, n_cpu = len(enf), len(gpu_windows), len(cpu_windows)
-    if not (n_enf == n_gpu == n_cpu):
-        raise ValueError(
-            f"length mismatch -- enf={n_enf}, gpu={n_gpu}, cpu={n_cpu}. "
-            f"All three must be the same length before merging."
-        )
+    n_enf = len(enf)
+
+    # find shortest window count across all nodes
+    min_nlr = min(
+        min(len(gpu), len(cpu))
+        for gpu, cpu in node_windows.values()
+    )
+
+    if pad_short_nlr:
+        # pad each node's windows up to ENF length
+        padded_windows: dict[str, tuple] = {}
+        for node_id, (gpu_windows, cpu_windows) in node_windows.items():
+            gpu_padded = _pad_windows(gpu_windows, n_enf,
+                                      label=f"{node_id} GPU")
+            cpu_padded = _pad_windows(cpu_windows, n_enf,
+                                      label=f"{node_id} CPU")
+            padded_windows[node_id] = (gpu_padded, cpu_padded)
+        target_length = n_enf
+        node_windows = padded_windows
+    else:
+        # trim ENF to shortest NLR
+        if min_nlr < n_enf:
+            print(f"[build_combined_records] trimming ENF from "
+                  f"{n_enf} to {min_nlr} samples to match NLR length")
+        enf = enf[:min_nlr]
+        target_length = min_nlr
 
     records: list[dict] = []
-    for i in range(n_enf):
-        record = {"index": i, "FRQ": enf[i]}
-        record.update(gpu_windows[i].to_dict())
-        record.update(cpu_windows[i].to_dict())
+    sorted_nodes = sorted(node_windows.keys())
+
+    for i in range(target_length):
+        record: dict = {"index": i, "FRQ": enf[i]}
+        for node_id in sorted_nodes:
+            gpu_windows, cpu_windows = node_windows[node_id]
+            prefix = f"{node_id}_"
+            record.update(gpu_windows[i].to_dict(prefix=prefix))
+            record.update(cpu_windows[i].to_dict(prefix=prefix))
         records.append(record)
 
     return records
 
 
 def write_combined_jsonl(records: list[dict], path: str) -> None:
-    """
-    Write combined records to a JSON Lines file -- one JSON object
-    per line, no enclosing array. This lets downstream readers
-    (Ethan's attack module, the dashboard, Blender) stream the file
-    one record at a time without loading it all into memory.
-
-    Usage:
-        enf = load_enf(enf_path)
-        gpu_windows, cpu_windows = load_nlr(nvml_path, rapl_path)
-        records = build_combined_records(enf, gpu_windows, cpu_windows)
-        write_combined_jsonl(records, "data/combined/run01.jsonl")
-    """
+    """Write combined records to a JSON Lines file."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
     with open(out_path, "w") as fh:
         for record in records:
             fh.write(json.dumps(record))
@@ -424,13 +718,7 @@ def write_combined_jsonl(records: list[dict], path: str) -> None:
 
 
 def read_combined_jsonl(path: str):
-    """
-    Generator that reads a combined JSONL file one line at a time.
-    Use this on the receiving end (verification, dashboard, Blender)
-    to stream records without loading the whole file into memory.
-
-    Yields one dict per line in file order.
-    """
+    """Generator that yields one combined record dict at a time."""
     with open(path) as fh:
         for line in fh:
             line = line.strip()
@@ -443,63 +731,63 @@ def read_combined_jsonl(path: str):
 # Synthetic fallbacks. Shapes only, not measurements.
 # --------------------------------------------------------------------------
 
-# _ENVELOPE = {
-#     WorkloadClass.IDLE: (90, 130),
-#     WorkloadClass.LLM_INFERENCE: (250, 600),
-#     WorkloadClass.LLM_TRAINING: (650, 780),
-#     WorkloadClass.IMAGE_GENERATION: (300, 550),
-# }
+_ENVELOPE = {
+    WorkloadClass.IDLE: (90, 130),
+    WorkloadClass.LLM_INFERENCE: (250, 600),
+    WorkloadClass.LLM_TRAINING: (650, 780),
+    WorkloadClass.IMAGE_GENERATION: (300, 550),
+}
 
 
-# def synthetic_power_profile(
-#     workload: WorkloadClass,
-#     node_id: str = "node_00",
-#     seconds: int = 120,
-#     hz: int = 5,
-#     seed: Optional[int] = None,
-# ) -> list[PowerSample]:
-#     """A power trace whose *shape* matches the named workload class."""
-#     rng = random.Random(seed)
-#     lo, hi = _ENVELOPE[workload]
-#     n = seconds * hz
-#     out: list[PowerSample] = []
-#     for i in range(n):
-#         t = i / hz
-#         if workload is WorkloadClass.LLM_TRAINING:
-#             base = hi - 30 + 30 * math.sin(t / 8)
-#         elif workload is WorkloadClass.LLM_INFERENCE:
-#             burst = hi if rng.random() < 0.18 else lo
-#             base = burst
-#         elif workload is WorkloadClass.IMAGE_GENERATION:
-#             base = lo + (hi - lo) * (0.5 + 0.5 * math.sin(t / 3))
-#         else:
-#             base = lo + 10 * rng.random()
-#         noise = rng.gauss(0, 8)
-#         out.append(
-#             PowerSample(
-#                 timestamp=t,
-#                 node_id=node_id,
-#                 power_w=max(0.0, base + noise),
-#                 workload_class=workload.value,
-#             )
-#         )
-#     return out
+def synthetic_power_profile(
+    workload: WorkloadClass,
+    node_id: str = "node_00",
+    seconds: int = 120,
+    hz: int = 5,
+    seed: Optional[int] = None,
+) -> list[PowerSample]:
+    """A power trace whose *shape* matches the named workload class."""
+    rng = random.Random(seed)
+    lo, hi = _ENVELOPE[workload]
+    n = seconds * hz
+    out: list[PowerSample] = []
+    for i in range(n):
+        t = i / hz
+        if workload is WorkloadClass.LLM_TRAINING:
+            base = hi - 30 + 30 * math.sin(t / 8)
+        elif workload is WorkloadClass.LLM_INFERENCE:
+            burst = hi if rng.random() < 0.18 else lo
+            base = burst
+        elif workload is WorkloadClass.IMAGE_GENERATION:
+            base = lo + (hi - lo) * (0.5 + 0.5 * math.sin(t / 3))
+        else:
+            base = lo + 10 * rng.random()
+        noise = rng.gauss(0, 8)
+        out.append(
+            PowerSample(
+                timestamp=t,
+                node_id=node_id,
+                power_w=max(0.0, base + noise),
+                workload_class=workload.value,
+            )
+        )
+    return out
 
 
-# def synthetic_enf(
-#     seconds: int = 120,
-#     hz: int = 5,
-#     nominal: float = 60.0,
-#     seed: Optional[int] = None,
-# ) -> list[float]:
-#     """A 60 Hz ENF trace with the small wandering fluctuation that makes ENF
-#     usable as a timestamp. A replay or fabricated trace will not share this
-#     wander, which is the property Leiva's verification exploits."""
-#     rng = random.Random(seed)
-#     out: list[float] = []
-#     f = nominal
-#     for _ in range(seconds * hz):
-#         f += rng.gauss(0, 0.003)
-#         f += (nominal - f) * 0.02
-#         out.append(f)
-#     return out
+def synthetic_enf(
+    seconds: int = 120,
+    hz: int = 5,
+    nominal: float = 60.0,
+    seed: Optional[int] = None,
+) -> list[float]:
+    """A 60 Hz ENF trace with the small wandering fluctuation that makes
+    ENF usable as a timestamp. A replay or fabricated trace will not share
+    this wander, which is the property Leiva's verification exploits."""
+    rng = random.Random(seed)
+    out: list[float] = []
+    f = nominal
+    for _ in range(seconds * hz):
+        f += rng.gauss(0, 0.003)
+        f += (nominal - f) * 0.02
+        out.append(f)
+    return out
