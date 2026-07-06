@@ -1,12 +1,13 @@
 """
 verification.py
 ---------------
-Verifier: runs sequential ENF and NLR checks and produces VerificationResult.
+Verifier: runs EVERY ENF and NLR check against EVERY component, every
+call, and returns a full list of per-component results. Nothing stops
+early. The job of this module is coverage and attribution -- test if
+something is wrong, mark exactly what and where, and pass all of that
+information along -- not to gate whether data keeps moving.
 
-Replaces fake_verify in scripts/smoke_test.py.
-
-Checks in order -- stops at the first failure:
-  ENF side:
+  ENF side (one shared grid signal -- one merged result per record):
     1. SequenceGuard          replay attack defense
     2. ENFNominalRangeCheck   injection defense on the RAW frequency value
                                (catches single-sample spikes that normalization
@@ -15,26 +16,44 @@ Checks in order -- stops at the first failure:
                                (flat or out-of-[0,1] shapes)
     4. ENFContinuityCheck     discontinuity defense (confidence hard threshold)
     5. DriftMonitor           slow drift defense (CUSUM across many windows)
-  NLR side (multi-node aware):
-    6. NLRRangeCheck          injection defense (impossible GPU/CPU wattage)
-                               -- works for any number of nodes, discovers
-                               channels dynamically from record keys
-    7. NLRContinuityCheck     discontinuity defense (sudden power jumps)
-                               -- tracks per-channel state, node-prefixed
-                               column names are unique keys so no collision
-    8. NLRMonotonicityCheck   tamper defense (cpu uJ counter must only
-                               increase, except for known hardware wraps)
-                               -- discovers all cpu uJ columns dynamically
+    All five always run. If more than one fires in the same window, the
+    merged ENF result reports the worst status and every reason that fired,
+    not just the first.
+
+  NLR side (multi-node aware -- one result per physical channel):
+    6. NLRRangeCheck           injection defense (impossible GPU/CPU wattage)
+    7. NLRContinuityCheck      discontinuity defense (sudden power jumps)
+    8. NLRMonotonicityCheck    tamper defense on CPU energy counters --
+                               checks BOTH directions: an illegitimate
+                               decrease (rollback, hiding real energy use)
+                               and an implausibly large increase (energy
+                               spike) that a decrease-only check would
+                               never catch.
+    9. GPUTempRangeCheck       NEW -- GPU temperature physical plausibility.
+                               Was previously discovered by _find_nlr_keys()
+                               but never actually checked by anything.
+   10. GPUTempContinuityCheck  NEW -- GPU temperature step-size plausibility.
+    Every channel present in the record gets its own result, every call --
+    a bad gpu-0[W] reading does not stop cpu-1[uJ] from being checked, and
+    if BOTH a range and a step-size problem hit the same channel in the
+    same window, they merge into one result naming both.
 
 Status mapping (per metrics.py -- only FAILED counts as a detection):
-  TRUSTED  all checks pass, confidence >= CONFIDENCE_TRUSTED
-  SUSPECT  all checks pass, confidence in [CONFIDENCE_SUSPECT, TRUSTED)
-  FAILED   any check fails definitively
+  TRUSTED  passes cleanly (dashboard-facing label: "good")
+  SUSPECT  ENF confidence in the soft zone, no hard check failed
+           (dashboard-facing label: "suspect")
+  FAILED   a hard check failed definitively
+           (dashboard-facing label: "warning")
+These three enum values (TRUSTED/SUSPECT/FAILED) are unchanged from
+before and metrics.py should keep working against them as-is -- the
+good/suspect/warning wording is a presentation-layer relabeling for
+the dashboard, not a change to what's stored or computed here.
 
-Thresholds at the top of this file are starting estimates calibrated
-against the two real NLR files profiled so far. Run calibrate_thresholds.py
-and nlr_profile.py against your full clean dataset and update these before
-relying on detection results for the paper.
+Thresholds at the top of this file are starting estimates. Two blocks
+are marked PLACEHOLDER below (GPU temperature, CPU energy upward-spike)
+because nothing has ever profiled real data for them -- treat any flag
+from those specific checks as provisional until they're calibrated the
+same way GPU_MAX_STEP_W etc. were.
 """
 
 from __future__ import annotations
@@ -85,6 +104,22 @@ CPU_MAX_STEP_W      = 16.0
 # RAPL energy counter hardware wraparound
 CPU_UJ_WRAP_CEILING   = 65_500_000_000
 CPU_UJ_WRAP_TOLERANCE =  2_000_000_000
+
+# ---------------------------------------------------------------------------
+# PLACEHOLDER thresholds -- NEW checks, NOT calibrated against real data.
+# GPU temperature was never checked by anything before this version.
+# CPU energy was only ever checked for illegitimate DECREASES; an
+# implausibly large but still-increasing jump passed unnoticed.
+# ---------------------------------------------------------------------------
+
+GPU_TEMP_FLOOR_C    = 0.0    # a GPU under any load at/below 0C is a stuck/fabricated sensor
+GPU_TEMP_CEILING_C  = 95.0   # datacenter GPUs throttle/shutdown in the 83-95C range
+GPU_TEMP_MAX_STEP_C = 15.0   # placeholder max plausible swing per ENF window
+
+# Derived (not arbitrary): CPU_POWER_CEILING_W for one ENF window,
+# converted to uJ, with a 1.5x safety margin.
+_ENF_WINDOW_SECONDS = 2.0
+CPU_UJ_MAX_STEP_UJ = CPU_POWER_CEILING_W * _ENF_WINDOW_SECONDS * 1_000_000 * 1.5
 
 # Score values
 SCORE_TRUSTED      = 0.95
@@ -139,8 +174,20 @@ def _find_nlr_keys(record: dict) -> dict[str, list[str]]:
     }
 
 
+def _worse(a: str, b: str) -> str:
+    """Rank: TRUSTED < SUSPECT < FAILED. Returns whichever is worse."""
+    rank = {
+        VerificationStatus.TRUSTED.value: 0,
+        VerificationStatus.SUSPECT.value: 1,
+        VerificationStatus.FAILED.value:  2,
+    }
+    return a if rank[a] >= rank[b] else b
+
+
 # ---------------------------------------------------------------------------
 # Internal check classes -- ENF side
+# One shared signal -- these check the WHOLE record, not per-key, and
+# every one of them always runs regardless of what the others found.
 # ---------------------------------------------------------------------------
 
 class _SequenceGuard:
@@ -267,79 +314,86 @@ class _DriftMonitor:
 
 # ---------------------------------------------------------------------------
 # Internal check classes -- NLR side (multi-node aware)
+#
+# Each .check() method below returns a dict keyed by the FULL column
+# name, mapping to (status, reason) for EVERY matching key found in the
+# record -- never just the first bad one. Callers merge these per-key
+# dicts across multiple check classes into one final result per channel.
 # ---------------------------------------------------------------------------
+
+_TRUSTED = VerificationStatus.TRUSTED.value
+_FAILED  = VerificationStatus.FAILED.value
+
 
 class _NLRRangeCheck:
     """
     Confirms GPU and CPU power readings are physically plausible.
-
-    Discovers channel keys dynamically from the record so it works
-    for any number of nodes without any hardcoded column names.
-    A single-node record has 4 GPU wattage keys; a 16-node record
-    has 64. Both are checked with identical logic.
+    Every gpu_power/cpu_power key gets its own entry, always.
     """
 
-    def check(self, record: dict) -> tuple[bool, str]:
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
         channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
 
         for key in channels["gpu_power"]:
             val = record.get(key)
             if val is None:
                 continue
             if val < 0:
-                return False, f"OUT OF RANGE: {key}={val:.2f}W is negative"
-            if val > GPU_POWER_CEILING_W:
-                return False, (
+                results[key] = (_FAILED, f"OUT OF RANGE: {key}={val:.2f}W is negative")
+            elif val > GPU_POWER_CEILING_W:
+                results[key] = (_FAILED, (
                     f"OUT OF RANGE: {key}={val:.2f}W exceeds hardware "
                     f"ceiling {GPU_POWER_CEILING_W}W"
-                )
+                ))
+            else:
+                results[key] = (_TRUSTED, "ok")
 
         for key in channels["cpu_power"]:
             val = record.get(key)
             if val is None:
                 continue
             if val < 0:
-                return False, f"OUT OF RANGE: {key}={val:.2f}W is negative"
-            if val > CPU_POWER_CEILING_W:
-                return False, (
+                results[key] = (_FAILED, f"OUT OF RANGE: {key}={val:.2f}W is negative")
+            elif val > CPU_POWER_CEILING_W:
+                results[key] = (_FAILED, (
                     f"OUT OF RANGE: {key}={val:.2f}W exceeds hardware "
                     f"ceiling {CPU_POWER_CEILING_W}W"
-                )
+                ))
+            else:
+                results[key] = (_TRUSTED, "ok")
 
-        return True, "ok"
+        return results
 
 
 class _NLRContinuityCheck:
     """
     Confirms GPU and CPU power does not jump implausibly between
-    consecutive aggregated windows.
-
-    Maintains previous-value state keyed by the full column name
-    (e.g. "x3105c0s41b0n0_gpu-0[W]"). Since each node's columns
-    have a unique prefix, there is no collision between nodes and
-    no changes are needed to support multi-node configurations --
-    the dict naturally tracks all nodes independently.
+    consecutive aggregated windows. Every key gets its own entry,
+    always -- state is kept per full column name so nodes never
+    collide and every channel is tracked independently.
     """
 
     def __init__(self):
         self._prev: dict[str, float] = {}
 
-    def check(self, record: dict) -> tuple[bool, str]:
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
         channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
 
         for key in channels["gpu_power"]:
             val = record.get(key)
             if val is None:
                 continue
             prev = self._prev.get(key)
-            if prev is not None:
+            if prev is not None and abs(val - prev) > GPU_MAX_STEP_W:
                 step = abs(val - prev)
-                if step > GPU_MAX_STEP_W:
-                    self._prev[key] = val
-                    return False, (
-                        f"DISCONTINUITY: {key} stepped {step:.2f}W between "
-                        f"windows, exceeds max plausible step {GPU_MAX_STEP_W}W"
-                    )
+                results[key] = (_FAILED, (
+                    f"DISCONTINUITY: {key} stepped {step:.2f}W between "
+                    f"windows, exceeds max plausible step {GPU_MAX_STEP_W}W"
+                ))
+            else:
+                results[key] = (_TRUSTED, "ok")
             self._prev[key] = val
 
         for key in channels["cpu_power"]:
@@ -347,17 +401,17 @@ class _NLRContinuityCheck:
             if val is None:
                 continue
             prev = self._prev.get(key)
-            if prev is not None:
+            if prev is not None and abs(val - prev) > CPU_MAX_STEP_W:
                 step = abs(val - prev)
-                if step > CPU_MAX_STEP_W:
-                    self._prev[key] = val
-                    return False, (
-                        f"DISCONTINUITY: {key} stepped {step:.2f}W between "
-                        f"windows, exceeds max plausible step {CPU_MAX_STEP_W}W"
-                    )
+                results[key] = (_FAILED, (
+                    f"DISCONTINUITY: {key} stepped {step:.2f}W between "
+                    f"windows, exceeds max plausible step {CPU_MAX_STEP_W}W"
+                ))
+            else:
+                results[key] = (_TRUSTED, "ok")
             self._prev[key] = val
 
-        return True, "ok"
+        return results
 
     def reset(self) -> None:
         self._prev.clear()
@@ -365,44 +419,150 @@ class _NLRContinuityCheck:
 
 class _NLRMonotonicityCheck:
     """
-    Confirms CPU energy counters (uJ) only increase, except for known
-    RAPL hardware wraparounds (~65.5 billion uJ drop).
-
-    Like _NLRContinuityCheck, state is keyed by the full prefixed
-    column name so all nodes are tracked independently with no
-    code changes required as node count varies.
+    Confirms CPU energy counters (uJ) behave like a real hardware
+    energy counter in BOTH directions:
+      - may only decrease via a known RAPL wraparound (~65.5B uJ drop)
+        -- any other decrease is a rollback attack, hiding real energy use
+      - may not increase by more than CPU_UJ_MAX_STEP_UJ in one window
+        (PLACEHOLDER, derived from CPU_POWER_CEILING_W -- not yet
+        profiled against real data) -- an implausibly large increase
+        that stayed "monotonic" would previously have passed unnoticed
     """
 
     def __init__(self):
         self._prev: dict[str, float] = {}
 
-    def check(self, record: dict) -> tuple[bool, str]:
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
         channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
 
         for key in channels["cpu_uj"]:
             val = record.get(key)
             if val is None:
                 continue
             prev = self._prev.get(key)
-            if prev is not None and val < prev:
+
+            if prev is None:
+                results[key] = (_TRUSTED, "ok")
+            elif val < prev:
                 drop = prev - val
-                is_expected_wrap = (
-                    abs(drop - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
-                )
-                if not is_expected_wrap:
-                    self._prev[key] = val
-                    return False, (
+                is_expected_wrap = abs(drop - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
+                if is_expected_wrap:
+                    results[key] = (_TRUSTED, "ok")
+                else:
+                    results[key] = (_FAILED, (
                         f"MONOTONICITY VIOLATION: {key} decreased by "
                         f"{drop:.1f} uJ -- not consistent with known hardware "
                         f"wrap (~{CPU_UJ_WRAP_CEILING:.0f} uJ). "
                         f"Counter should only increase or wrap."
-                    )
+                    ))
+            else:
+                increase = val - prev
+                if increase > CPU_UJ_MAX_STEP_UJ:
+                    results[key] = (_FAILED, (
+                        f"ENERGY SPIKE: {key} increased by {increase:.1f} uJ "
+                        f"in one window, exceeds plausibility ceiling "
+                        f"{CPU_UJ_MAX_STEP_UJ:.1f} uJ (PLACEHOLDER threshold)"
+                    ))
+                else:
+                    results[key] = (_TRUSTED, "ok")
+
             self._prev[key] = val
 
-        return True, "ok"
+        return results
 
     def reset(self) -> None:
         self._prev.clear()
+
+
+class _GPUTempRangeCheck:
+    """
+    NEW. Confirms GPU temperature readings are physically plausible.
+    gpu_temp keys were already discovered by _find_nlr_keys() but
+    nothing ever checked them before this class existed -- an attacker
+    could set GPU temperature to any value with zero detection.
+
+    PLACEHOLDER thresholds -- not calibrated against real data.
+    """
+
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
+        channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
+
+        for key in channels["gpu_temp"]:
+            val = record.get(key)
+            if val is None:
+                continue
+            if val <= GPU_TEMP_FLOOR_C or val > GPU_TEMP_CEILING_C:
+                results[key] = (_FAILED, (
+                    f"OUT OF RANGE: {key}={val:.1f}C outside plausible "
+                    f"[{GPU_TEMP_FLOOR_C}, {GPU_TEMP_CEILING_C}]C "
+                    f"(PLACEHOLDER threshold)"
+                ))
+            else:
+                results[key] = (_TRUSTED, "ok")
+
+        return results
+
+
+class _GPUTempContinuityCheck:
+    """
+    NEW. Confirms GPU temperature does not jump implausibly between
+    consecutive windows -- thermal mass gives real GPUs inertia; an
+    instant multi-degree swing is a strong tamper signal.
+
+    PLACEHOLDER threshold -- not calibrated against real data.
+    """
+
+    def __init__(self):
+        self._prev: dict[str, float] = {}
+
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
+        channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
+
+        for key in channels["gpu_temp"]:
+            val = record.get(key)
+            if val is None:
+                continue
+            prev = self._prev.get(key)
+            if prev is not None and abs(val - prev) > GPU_TEMP_MAX_STEP_C:
+                step = abs(val - prev)
+                results[key] = (_FAILED, (
+                    f"DISCONTINUITY: {key} stepped {step:.1f}C between "
+                    f"windows, exceeds max plausible step {GPU_TEMP_MAX_STEP_C}C "
+                    f"(PLACEHOLDER threshold)"
+                ))
+            else:
+                results[key] = (_TRUSTED, "ok")
+            self._prev[key] = val
+
+        return results
+
+    def reset(self) -> None:
+        self._prev.clear()
+
+
+def _merge_key_results(*result_dicts: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
+    """
+    Merges per-key (status, reason) dicts from multiple check classes
+    into one final dict per key. If a channel is flagged by more than
+    one check in the same window (e.g. both a range AND a step-size
+    problem), the merged entry keeps the WORST status and concatenates
+    every non-"ok" reason -- nothing gets silently dropped in a merge.
+    """
+    merged: dict[str, tuple[str, str]] = {}
+    for result_dict in result_dicts:
+        for key, (status, reason) in result_dict.items():
+            if key not in merged:
+                merged[key] = (status, reason)
+            else:
+                prev_status, prev_reason = merged[key]
+                new_status = _worse(prev_status, status)
+                reasons = [r for r in (prev_reason, reason) if r != "ok"]
+                new_reason = " | ".join(reasons) if reasons else "ok"
+                merged[key] = (new_status, new_reason)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -411,25 +571,26 @@ class _NLRMonotonicityCheck:
 
 class Verifier:
     """
-    Runs all ENF and NLR checks for every (sample, anchor) pair.
+    Runs EVERY ENF and NLR check for EVERY component, every call.
+    Nothing stops early -- verify() always returns a result for the
+    ENF anchor plus one result per NLR channel present in the record.
 
     Fully multi-node aware: the NLR checks discover channel names
-    dynamically from the record so they work identically for 1 node
-    or 16 nodes with no configuration required.
+    dynamically from record keys, so an instance constructed for one
+    node's own sub-record only ever reports on that node's channels.
 
     Parameters
     ----------
     component_id : str
-        Twin component being verified e.g. "rack_00".
-        Must match Hendricks' StateVariable.source_object and
-        Marchisano's AttackEvent.target_component.
+        Identifies what's being verified, e.g. "rack_00/x3105c0s37b0n0".
+        Individual NLR results extend this with the channel name, e.g.
+        "rack_00/x3105c0s37b0n0/gpu-0[W]".
     warmup_windows : int
         Clean windows before drift baseline is calibrated.
-        Keep below the earliest possible attack start.
     strict_ordering : bool
         Enforce strictly increasing timestamps.
     check_nlr : bool
-        Whether to run the NLR checks. Default True.
+        Whether to run the NLR/GPU-temp checks. Default True.
         Set False for ENF-only testing.
     """
 
@@ -455,6 +616,8 @@ class Verifier:
         self._nlr_range_check        = _NLRRangeCheck()
         self._nlr_continuity_check   = _NLRContinuityCheck()
         self._nlr_monotonicity_check = _NLRMonotonicityCheck()
+        self._gpu_temp_range_check      = _GPUTempRangeCheck()
+        self._gpu_temp_continuity_check = _GPUTempContinuityCheck()
 
         self._windows_processed: int = 0
 
@@ -466,22 +629,21 @@ class Verifier:
     def windows_processed(self) -> int:
         return self._windows_processed
 
-    def verify(self, sample, anchor: AnchorRecord) -> VerificationResult:
+    def verify(self, sample, anchor: AnchorRecord) -> list[VerificationResult]:
         """
-        Verify one sample against its anchor.
+        Verify one sample against its anchor. Always runs every check
+        and always returns a full list of results -- one merged result
+        for the ENF anchor, plus one result per NLR/GPU-temp channel
+        present in `sample` (when check_nlr=True).
 
         Parameters
         ----------
         sample : dict or object with .timestamp
-            Combined record from read_combined_jsonl() (post-Ethan),
-            or a PowerSample / StateVariable object.
-            For dict input: must have "index" or "timestamp" key.
-            NLR checks use whatever node-prefixed channel keys are
-            present -- no configuration required for multi-node.
+            Combined record (or per-node sub-record) from
+            read_combined_jsonl(), post-Ethan.
         anchor : AnchorRecord
             ENF anchor from AnchorExtractor.extract() for same timestamp.
         """
-        # extract timestamp
         if hasattr(sample, "timestamp"):
             ts = sample.timestamp
         elif isinstance(sample, dict):
@@ -489,139 +651,108 @@ class Verifier:
         else:
             ts = 0.0
 
-        # ----------------------------------------------------------------
-        # Check 1: Sequence guard -- replay defense
-        # ----------------------------------------------------------------
+        results: list[VerificationResult] = []
+
+        # ------------------------------------------------------------
+        # ENF side: run every check unconditionally, merge into ONE
+        # result for the shared anchor component.
+        # ------------------------------------------------------------
+        enf_status = VerificationStatus.TRUSTED.value
+        enf_reasons: list[str] = []
+
         passed, reason = self._sequence_guard.check(ts)
         if not passed:
-            return self._make_result(
-                ts, anchor, VerificationStatus.FAILED,
-                SCORE_FAILED_HARD, reason
-            )
+            enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+            enf_reasons.append(reason)
 
-        # ----------------------------------------------------------------
-        # Check 2: ENF nominal range -- raw frequency injection defense
-        # ----------------------------------------------------------------
         raw_freq = None
         if isinstance(sample, dict):
             raw_freq = sample.get("FRQ", sample.get("frequency_hz"))
         else:
-            raw_freq = getattr(sample, "FRQ",
-                       getattr(sample, "frequency_hz", None))
+            raw_freq = getattr(sample, "FRQ", getattr(sample, "frequency_hz", None))
 
         if raw_freq is not None:
             passed, reason = self._nominal_range_check.check(raw_freq)
             if not passed:
-                return self._make_result(
-                    ts, anchor, VerificationStatus.FAILED,
-                    SCORE_FAILED_HARD, reason
-                )
+                enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+                enf_reasons.append(reason)
 
-        # ----------------------------------------------------------------
-        # Check 3: ENF signature range -- normalized shape check
-        # ----------------------------------------------------------------
         passed, reason = self._range_check.check(anchor.signature)
         if not passed:
-            return self._make_result(
-                ts, anchor, VerificationStatus.FAILED,
-                SCORE_FAILED_HARD, reason
-            )
+            enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+            enf_reasons.append(reason)
 
-        # ----------------------------------------------------------------
-        # Check 4: ENF continuity -- confidence hard threshold
-        # ----------------------------------------------------------------
         passed, reason = self._continuity_check.check(anchor.confidence)
         if not passed:
-            return self._make_result(
-                ts, anchor, VerificationStatus.FAILED,
-                anchor.confidence, reason
+            enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+            enf_reasons.append(reason)
+
+        # Drift monitor always records -- independent of every other
+        # check's outcome, ENF-side or NLR-side.
+        self._drift_monitor.record(anchor.confidence)
+        self._windows_processed += 1
+        if self._windows_processed == self._warmup_windows:
+            self._drift_monitor.calibrate()
+
+        if self._drift_monitor.is_drifting():
+            enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+            enf_reasons.append(
+                f"DRIFT DETECTED: CUSUM={self._drift_monitor.cusum:.3f} "
+                f"exceeded threshold={CUSUM_THRESHOLD} "
+                f"over {self._drift_monitor.sample_count} windows"
+            )
+            self._drift_monitor.reset()
+
+        # Soft confidence tier only applies if nothing hard already failed
+        if enf_status == VerificationStatus.TRUSTED.value and anchor.confidence < CONFIDENCE_TRUSTED:
+            enf_status = VerificationStatus.SUSPECT.value
+            enf_reasons.append(
+                f"confidence {anchor.confidence:.4f} below normal threshold "
+                f"{CONFIDENCE_TRUSTED} -- monitoring"
             )
 
-        # ----------------------------------------------------------------
-        # Checks 6-8: NLR checks -- multi-node, dynamic channel discovery
-        # ----------------------------------------------------------------
+        enf_score = {
+            VerificationStatus.TRUSTED.value: SCORE_TRUSTED,
+            VerificationStatus.SUSPECT.value: anchor.confidence,
+            VerificationStatus.FAILED.value:  SCORE_FAILED_HARD,
+        }[enf_status]
+
+        results.append(VerificationResult(
+            timestamp=ts,
+            component_id=f"{self._component_id}/ENF",
+            status=enf_status,
+            score=round(enf_score, 4),
+            anchor_ref=anchor.timestamp,
+            reason=" | ".join(enf_reasons) if enf_reasons else "ok",
+        ))
+
+        # ------------------------------------------------------------
+        # NLR side: run every check unconditionally, merge per-channel,
+        # emit one result per channel present -- always, good or bad.
+        # ------------------------------------------------------------
         if self._check_nlr:
             record_dict = (
                 sample if isinstance(sample, dict)
                 else getattr(sample, "__dict__", {})
             )
 
-            passed, reason = self._nlr_range_check.check(record_dict)
-            if not passed:
-                return self._make_result(
-                    ts, anchor, VerificationStatus.FAILED,
-                    SCORE_FAILED_HARD, reason
-                )
-
-            passed, reason = self._nlr_continuity_check.check(record_dict)
-            if not passed:
-                return self._make_result(
-                    ts, anchor, VerificationStatus.FAILED,
-                    SCORE_FAILED_HARD, reason
-                )
-
-            passed, reason = self._nlr_monotonicity_check.check(record_dict)
-            if not passed:
-                return self._make_result(
-                    ts, anchor, VerificationStatus.FAILED,
-                    SCORE_FAILED_HARD, reason
-                )
-
-        # ----------------------------------------------------------------
-        # Check 5: Drift monitor -- slow drift via CUSUM
-        # ----------------------------------------------------------------
-        self._drift_monitor.record(anchor.confidence)
-        self._windows_processed += 1
-
-        if self._windows_processed == self._warmup_windows:
-            self._drift_monitor.calibrate()
-
-        if self._drift_monitor.is_drifting():
-            drift_score = max(
-                0.0,
-                SCORE_FAILED_DRIFT *
-                (1.0 - self._drift_monitor.cusum / CUSUM_THRESHOLD)
-            )
-            reason = (
-                f"DRIFT DETECTED: CUSUM={self._drift_monitor.cusum:.3f} "
-                f"exceeded threshold={CUSUM_THRESHOLD} "
-                f"over {self._drift_monitor.sample_count} windows"
-            )
-            self._drift_monitor.reset()
-            return self._make_result(
-                ts, anchor, VerificationStatus.FAILED,
-                drift_score, reason
+            merged = _merge_key_results(
+                self._nlr_range_check.check(record_dict),
+                self._nlr_continuity_check.check(record_dict),
+                self._nlr_monotonicity_check.check(record_dict),
+                self._gpu_temp_range_check.check(record_dict),
+                self._gpu_temp_continuity_check.check(record_dict),
             )
 
-        # ----------------------------------------------------------------
-        # All checks passed
-        # ----------------------------------------------------------------
-        if anchor.confidence >= CONFIDENCE_TRUSTED:
-            return self._make_result(
-                ts, anchor, VerificationStatus.TRUSTED,
-                anchor.confidence, "ok"
-            )
-        else:
-            return self._make_result(
-                ts, anchor, VerificationStatus.SUSPECT,
-                anchor.confidence,
-                f"confidence {anchor.confidence:.4f} below "
-                f"normal threshold {CONFIDENCE_TRUSTED} -- monitoring"
-            )
+            for key, (status, reason) in merged.items():
+                score = SCORE_TRUSTED if status == VerificationStatus.TRUSTED.value else SCORE_FAILED_HARD
+                results.append(VerificationResult(
+                    timestamp=ts,
+                    component_id=f"{self._component_id}/{key}",
+                    status=status,
+                    score=round(score, 4),
+                    anchor_ref=anchor.timestamp,
+                    reason=reason,
+                ))
 
-    def _make_result(
-        self,
-        timestamp: float,
-        anchor: AnchorRecord,
-        status: VerificationStatus,
-        score: float,
-        reason: str,
-    ) -> VerificationResult:
-        return VerificationResult(
-            timestamp=timestamp,
-            component_id=self._component_id,
-            status=status.value,
-            score=round(score, 4),
-            anchor_ref=anchor.timestamp,
-            reason=reason,
-        )
+        return results

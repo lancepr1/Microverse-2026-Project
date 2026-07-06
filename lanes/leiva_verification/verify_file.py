@@ -12,6 +12,12 @@ you want to inject a synthetic attack yourself into a clean file. If the
 file is already in whatever state you want to test, use this script
 instead.
 
+Feed it the WHOLE combined record, all nodes at once -- one Verifier
+instance is enough. Verifier.verify() attributes every result down to
+the exact column name (which already contains the node ID, e.g.
+"x3105c0s37b0n0_gpu-0[W]"), and never stops early, so per-node/
+per-component attribution falls out naturally with no manual slicing.
+
 Run from the repo root:
     python lanes/leiva_verification/verify_file.py \
         --input "/path/to/your/file.jsonl" \
@@ -20,6 +26,7 @@ Run from the repo root:
 
 import argparse
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -36,7 +43,7 @@ def main():
     parser.add_argument("--component-id", default="rack_00")
     parser.add_argument(
         "--show-all", action="store_true",
-        help="Print every record's result, not just non-TRUSTED ones"
+        help="Print every component's result every window, not just non-TRUSTED ones"
     )
     args = parser.parse_args()
 
@@ -48,37 +55,49 @@ def main():
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
     verifier = Verifier(component_id=args.component_id, warmup_windows=10, check_nlr=True)
 
-    results = []
+    # Per-component counters -- component_id already carries node + channel
+    component_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"trusted": 0, "suspect": 0, "failed": 0})
+    total_counts = {"trusted": 0, "suspect": 0, "failed": 0}
+
     for record in records:
         record = dict(record)
         record["timestamp"] = float(record["index"])
         anchor = extractor.extract(record["timestamp"])
-        result = verifier.verify(record, anchor)
-        results.append(result)
 
-        if args.show_all or result.status != "trusted":
-            print(f"  [{record['index']:5d}] {result.status.upper():8s} "
-                  f"score={result.score:.3f}  {result.reason}")
+        # verify() now returns a LIST -- one merged ENF result plus one
+        # result per NLR/GPU-temp channel present, every call, always.
+        results = verifier.verify(record, anchor)
+
+        for result in results:
+            component_counts[result.component_id][result.status] += 1
+            total_counts[result.status] += 1
+
+            if args.show_all or result.status != "trusted":
+                print(f"  [{record['index']:5d}] {result.component_id:40s} "
+                      f"{result.status.upper():8s} score={result.score:.3f}  {result.reason}")
 
     # ----------------------------------------------------------------
     # Summary
     # ----------------------------------------------------------------
-    counts = {"trusted": 0, "suspect": 0, "failed": 0}
-    for r in results:
-        counts[r.status] = counts.get(r.status, 0) + 1
+    print(f"\n{'='*70}")
+    print("OVERALL SUMMARY (across all components, all windows)")
+    print(f"{'='*70}")
+    print(f"  TRUSTED : {total_counts['trusted']}")
+    print(f"  SUSPECT : {total_counts['suspect']}")
+    print(f"  FAILED  : {total_counts['failed']}")
 
-    print(f"\n{'='*60}")
-    print("SUMMARY")
-    print(f"{'='*60}")
-    print(f"  Total records : {len(results)}")
-    print(f"  TRUSTED       : {counts.get('trusted', 0)}")
-    print(f"  SUSPECT       : {counts.get('suspect', 0)}")
-    print(f"  FAILED        : {counts.get('failed', 0)}")
-
-    failed_indices = [r.timestamp for r in results if r.status == "failed"]
-    if failed_indices:
-        print(f"\n  Flagged (FAILED) at timestamps/indices: {[int(t) for t in failed_indices]}")
-    print(f"{'='*60}\n")
+    flagged = {
+        cid: counts for cid, counts in component_counts.items()
+        if counts["failed"] or counts["suspect"]
+    }
+    if flagged:
+        print(f"\n  Components with at least one non-TRUSTED result:")
+        for cid, counts in sorted(flagged.items()):
+            print(f"    {cid:40s} trusted={counts['trusted']:5d}  "
+                  f"suspect={counts['suspect']:4d}  failed={counts['failed']:4d}")
+    else:
+        print("\n  Every component was TRUSTED for the entire file.")
+    print(f"{'='*70}\n")
 
 
 if __name__ == "__main__":
