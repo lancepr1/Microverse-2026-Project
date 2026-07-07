@@ -42,6 +42,7 @@ import json
 import math
 import random
 import re
+import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -102,6 +103,136 @@ def load_enf(path: str) -> list[float]:
             except (ValueError, IndexError):
                 continue
     return values
+
+
+# ---------------------------------------------------------------------------
+# ENF cleaning -- OPTIONAL, explicit step. NOT called automatically by
+# load_enf() -- call it yourself in the pipeline (e.g. pipeline_test.py)
+# right after load_enf(), so the transformation is visible and auditable
+# rather than hidden inside loading.
+#
+# Found via diagnose_enf_glitch.py against 24 real AFRL recordings
+# (3 devices, ~20 hours): every file showed a systematic pattern of
+# large single-step jumps (mean 19.0% of all steps > 1.0 Hz across the
+# 24 files), including some mathematically impossible single-sample
+# readings (negative Hz, >100 Hz). Confirmed via raw CSV row inspection
+# this is NOT a parsing bug -- the implausible values are genuinely
+# written in the source files.
+#
+# This function detects and corrects both:
+#   - physically impossible single readings (outside a wide sanity
+#     range) -- unambiguous, no real grid frequency is negative or >80Hz
+#   - the pervasive large-step pattern, via a Hampel filter (rolling
+#     median + MAD-based outlier detection)
+#
+# IMPORTANT, validated finding: replacing detected outliers with the
+# local median (the textbook Hampel filter) creates runs of EXACTLY
+# repeated values, which collapses the natural micro-variance that
+# AnchorExtractor's Pearson-correlation confidence metric depends on --
+# this was measured to make downstream confidence WORSE, not better.
+# This implementation instead replaces outliers via LINEAR
+# INTERPOLATION between the nearest non-outlier neighbors, preserving
+# a smooth trend through the gap instead of a flat plateau.
+#
+# Measured effect (24 real files): mean large-step rate 19.0% -> 2.4%.
+# Effect on AnchorExtractor confidence is REAL but MODEST, not a full
+# fix -- confidence remains well below the current CONFIDENCE_TRUSTED
+# placeholder even after cleaning. This suggests CONFIDENCE_TRUSTED/
+# CONFIDENCE_SUSPECT are themselves uncalibrated placeholders, separate
+# from the data-quality issue -- run calibrate_thresholds.py against
+# CLEANED output, not raw data, before trusting any threshold values.
+#
+# NOT yet validated against Ethan's attack scenarios -- open question
+# whether cleaning could inadvertently smooth away a genuine injected
+# ENF attack. Test before relying on this in any result that matters.
+# ---------------------------------------------------------------------------
+
+def clean_enf(
+    values: list[float],
+    physical_floor: float = 40.0,
+    physical_ceiling: float = 80.0,
+    hampel_window: int = 11,
+    hampel_n_sigmas: float = 2.0,
+) -> list[float]:
+    """
+    Detects and corrects implausible ENF readings via a two-stage
+    process, replacing all detected outliers by linear interpolation
+    between the nearest non-outlier neighbors (never a flat median --
+    see module comment above for why that matters).
+
+    Stage 1: physical-range check. Any reading outside
+        [physical_floor, physical_ceiling] Hz is marked bad
+        unconditionally -- no real grid frequency is negative or
+        above ~80 Hz, this isn't a judgment call.
+
+    Stage 2: Hampel filter (rolling median + MAD). For each point,
+        compares against the median of a window of hampel_window
+        samples on each side (using only already-known-good points),
+        flags it bad if it deviates more than
+        hampel_n_sigmas * 1.4826 * MAD from that local median.
+
+    Parameters
+    ----------
+    values : list[float]
+        Raw ENF readings from load_enf().
+    physical_floor, physical_ceiling : float
+        Hard sanity bounds in Hz. Default 40-80 Hz is deliberately
+        generous -- only catches readings with no possible physical
+        interpretation, not borderline-plausible ones.
+    hampel_window : int
+        Samples on each side of the point being checked (11 was
+        tuned against 24 real files -- see module comment).
+    hampel_n_sigmas : float
+        Outlier threshold in "sigmas" (MAD-scaled). Lower = more
+        aggressive. 2.0 was chosen as a middle ground between removing
+        more of the large-step pattern (favors ~1.0-1.5) and being
+        conservative about not touching real small-scale variation
+        (favors ~3.0) -- re-validate this choice if the character of
+        future recordings differs from the 24 files this was tuned on.
+
+    Returns
+    -------
+    list[float]
+        Same length as input. Detected-bad points replaced via linear
+        interpolation between nearest good neighbors.
+    """
+    n = len(values)
+    if n == 0:
+        return values
+
+    bad = [v < physical_floor or v > physical_ceiling for v in values]
+
+    k = 1.4826
+    for i in range(n):
+        w_lo = max(0, i - hampel_window)
+        w_hi = min(n, i + hampel_window + 1)
+        window = [values[j] for j in range(w_lo, w_hi) if not bad[j]]
+        if len(window) < 2:
+            continue
+        med = statistics.median(window)
+        mad = statistics.median([abs(v - med) for v in window])
+        threshold = hampel_n_sigmas * k * mad
+        if threshold > 0 and abs(values[i] - med) > threshold:
+            bad[i] = True
+
+    result = list(values)
+    bad_idx = [i for i, b in enumerate(bad) if b]
+    for i in bad_idx:
+        lo = i - 1
+        while lo >= 0 and bad[lo]:
+            lo -= 1
+        hi = i + 1
+        while hi < n and bad[hi]:
+            hi += 1
+        if lo >= 0 and hi < n:
+            frac = (i - lo) / (hi - lo)
+            result[i] = values[lo] + frac * (values[hi] - values[lo])
+        elif lo >= 0:
+            result[i] = values[lo]
+        elif hi < n:
+            result[i] = values[hi]
+
+    return result
 
 
 # --------------------------------------------------------------------------

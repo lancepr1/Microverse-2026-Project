@@ -8,7 +8,11 @@ import sys
 # Change these parameters to alter attack behaviors, ranges, and types.
 # =====================================================================
 
-INPUT_FILE = "../../data/combined/run_2node.jsonl"  # Path to your input data file
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+RAW_PATH = os.path.join(SCRIPT_DIR, "../../data/combined/run_2node.jsonl")
+
+INPUT_FILE = os.path.normpath(RAW_PATH) 
 SELECTED_OPTION = int(input("Enter which scenario you'd like to test (0-4): "))            # Choose option: 0, 1, 2, 3, or 4
 if SELECTED_OPTION < 0 or SELECTED_OPTION > 4:
 	print("Please select a number 0-4")
