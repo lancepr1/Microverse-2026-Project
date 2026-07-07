@@ -97,8 +97,8 @@ ENF_PATH = "/home/brandon/Desktop/ENF-ML (CNN+MAMBA)/Data/Dev1_ENF_Hr01.csv"
 
 # --- Training run (SLURM-tagged filenames, e.g. multiple hours co-located
 #     in one folder) ---
-NLR_FOLDER = "/home/brandon/Desktop/00_raw_datasets/training_llama2_70b_lora/16node/"
-SLURM_ID = "10742842"
+NLR_FOLDER = "/home/brandon/Desktop/00_raw_datasets/training_llama2_70b_lora/2node/"
+SLURM_ID = "10742795"
 
 # --- Inference run (old-style filenames, e.g. "nvml_wattameter_x3115c0s33b0n0.log")
 #     no SLURM ID in the filename at all. Node ID extraction already works
@@ -113,7 +113,7 @@ SLURM_ID = "10742842"
 
 # Output stays repo-relative regardless of where your raw data lives --
 # anchored to this file's own location, not your current directory.
-OUT_PATH = REPO_ROOT / "data" / "combined" / "run_16node.jsonl"
+OUT_PATH = REPO_ROOT / "data" / "combined" / "run_2node.jsonl"
 
 # ---------------------------------------------------------------------------
 

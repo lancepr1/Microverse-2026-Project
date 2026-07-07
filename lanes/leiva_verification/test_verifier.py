@@ -361,6 +361,93 @@ def test_enf_nominal_spike_end_to_end():
           enf_result.status == "failed" and "NOMINAL" in enf_result.reason, enf_result.reason)
 
 
+def test_synchronized_event_downgraded_to_suspect():
+    """A real system-wide event (checkpoint/sync/startup) shows up as
+    the SAME channel stepping on MANY independent nodes at once --
+    this should be downgraded to SUSPECT with a corroboration note,
+    not left as a hard FAILED."""
+    nodes = tuple(f"node_{i}" for i in range(16))
+    records = make_records(20, node_ids=nodes)
+    for node in nodes[:14]:  # 14/16 nodes -- passes both min_nodes and min_fraction
+        records[10][f"{node}_cpu-0[W]"] = 90.0 + 25.0
+    results = run_verifier(records)
+    r10 = results[10]
+
+    corroborated = [find(r10, f"{n}_cpu-0[W]") for n in nodes[:14]]
+    all_suspect = all(r.status == "suspect" for r in corroborated)
+    all_have_note = all("SYNCHRONIZED EVENT" in r.reason for r in corroborated)
+    check("Integration: 14/16-node synchronized step downgraded to SUSPECT",
+          all_suspect, [r.status for r in corroborated])
+    check("Integration: corroborated results carry the SYNCHRONIZED EVENT note",
+          all_have_note)
+
+    untouched = [find(r10, f"{n}_cpu-0[W]") for n in nodes[14:]]
+    check("Integration: nodes that did NOT step stay TRUSTED",
+          all(r.status == "trusted" for r in untouched))
+
+
+def test_isolated_single_node_attack_not_downgraded():
+    """The security property that matters: an attacker hitting ONE node
+    cannot benefit from corroboration -- with no other nodes agreeing,
+    the failure must stay a hard FAILED, not get softened."""
+    nodes = tuple(f"node_{i}" for i in range(16))
+    records = make_records(20, node_ids=nodes)
+    records[10]["node_0_cpu-0[W]"] = 90.0 + 25.0  # ONLY node_0 steps -- no corroboration
+    results = run_verifier(records)
+    r10 = results[10]
+
+    attacked = find(r10, "node_0_cpu-0[W]")
+    check("Integration: isolated single-node attack stays FAILED (not corroborated)",
+          attacked.status == "failed", attacked.reason)
+    check("Integration: isolated attack does NOT carry a SYNCHRONIZED EVENT note",
+          "SYNCHRONIZED EVENT" not in attacked.reason, attacked.reason)
+
+    others_clean = all(
+        find(r10, f"{n}_cpu-0[W]").status == "trusted" for n in nodes[1:]
+    )
+    check("Integration: other 15 nodes remain TRUSTED, unaffected by node_0's attack",
+          others_clean)
+
+
+def test_small_deployment_scaled_floor_both_nodes_agree():
+    """A 2-node deployment can never reach a FIXED floor of 4 -- the
+    scaled floor (max(2, min(4, total_nodes))) means 2 nodes agreeing
+    unanimously should still corroborate, unlike the old fixed-floor
+    behavior which made corroboration mathematically impossible below
+    4 nodes regardless of deployment size."""
+    nodes = ("node_A", "node_B")
+    records = make_records(20, node_ids=nodes)
+    records[10]["node_A_cpu-0[W]"] = 90.0 + 25.0
+    records[10]["node_B_cpu-0[W]"] = 90.0 + 24.0
+    results = run_verifier(records)
+    r10 = results[10]
+
+    a = find(r10, "node_A_cpu-0[W]")
+    b = find(r10, "node_B_cpu-0[W]")
+    check("Integration: 2-node deployment, both agree -> corroborated to SUSPECT",
+          a.status == "suspect" and b.status == "suspect", (a.status, b.status))
+    check("Integration: 2-node corroboration note mentions the scaled requirement",
+          "required >=2 of 2" in a.reason, a.reason)
+
+
+def test_small_deployment_isolated_node_still_fails():
+    """Same 2-node deployment, but only ONE node steps -- this must
+    stay a hard FAILED. The scaled floor makes small deployments
+    ABLE to corroborate, it does not make them lenient by default."""
+    nodes = ("node_A", "node_B")
+    records = make_records(20, node_ids=nodes)
+    records[10]["node_A_cpu-0[W]"] = 90.0 + 25.0  # only node_A steps
+    results = run_verifier(records)
+    r10 = results[10]
+
+    a = find(r10, "node_A_cpu-0[W]")
+    b = find(r10, "node_B_cpu-0[W]")
+    check("Integration: 2-node deployment, isolated step stays FAILED",
+          a.status == "failed", a.reason)
+    check("Integration: 2-node deployment, uninvolved node stays TRUSTED",
+          b.status == "trusted", b.status)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
