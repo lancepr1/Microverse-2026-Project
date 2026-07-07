@@ -19,13 +19,6 @@ def test_data_feed_imports_and_exposes_poll():
     assert callable(data_feed.poll)
 
 
-def test_ui_rack_cards_imports():
-    from ui.rack_cards import status_color, render_rack_card, render_detail_panel
-    assert status_color("anything") == "rgb(90, 90, 90)"
-    assert render_rack_card({}) is not None
-    assert render_detail_panel({}) is not None
-
-
 def test_ui_charts_imports():
     from ui.charts import update_charts, reset_charts, build_figures, get_figures
     assert callable(update_charts)

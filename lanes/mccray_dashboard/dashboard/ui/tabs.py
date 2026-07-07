@@ -9,9 +9,8 @@ callback maps the store value to per-panel {"display": "block"/"none"}
 styles, so every tab's content stays permanently mounted in the DOM (just
 hidden when its tab isn't active) instead of being torn down and rebuilt on
 every switch. That keeps every existing component id main.py's polling
-callback targets (frq-graph, rack-card-container, etc.) present at all
-times, so nothing about that callback has to change as content moves into
-tabs in later steps.
+callback targets (frq-graph, header-frq-hz, etc.) present at all times, so
+nothing about that callback has to change as content moves into tabs.
 """
 from dash import html, dcc, callback, Input, Output, State, ALL, ctx
 

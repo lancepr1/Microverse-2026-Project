@@ -18,8 +18,19 @@ forecast model in this repo, so no "Breach ~Xs" countdown is fabricated.
 The detail panel's 30-Second Forecast, Weakpoint RNN, and AI Explanation
 sections are all labeled placeholders for the same reason: none of that
 model inference exists yet, and building it is out of scope here.
+
+The 16 node-card buttons and 4 rack cards are built ONCE, in
+build_operator_tab(), and never replaced afterward. Earlier this module
+rebuilt the whole grid's `children` on every poll tick, which re-created
+every html.Button with a hardcoded n_clicks=0 -- Dash's pattern-matching
+click Input then saw that as a real click event on every tick, repeatedly
+overwriting whatever node you'd actually selected back to the first one in
+the grid. Instead, each node/rack card's changing bits (power, temp,
+badge, border color) have their own ids and are updated in place via
+MATCH-pattern callbacks below, so the buttons themselves -- and their
+client-side n_clicks/selection state -- are never touched by a data tick.
 """
-from dash import html, dcc, callback, Input, Output, ALL, ctx, no_update
+from dash import html, dcc, callback, Input, Output, State, ALL, MATCH, ctx, no_update
 
 from data_feed import list_node_ids, poll_all
 
@@ -54,8 +65,10 @@ def build_operator_tab() -> html.Div:
                   children=render_summary_cards({})),
 
         html.Div(className="operator-body", children=[
-            html.Div(id="rack-grid-container", className="rack-grid",
-                      children=render_rack_grid({}, None)),
+            html.Div(className="rack-grid", children=[
+                _build_rack_card(rack_label, node_ids)
+                for rack_label, node_ids in get_rack_groups()
+            ]),
             html.Div(id="operator-detail-container",
                       className="panel operator-detail-panel",
                       children=render_operator_detail(None, {})),
@@ -84,32 +97,39 @@ def _summary_card(label, value, color=COLOR_LABEL):
     ])
 
 
-def render_rack_grid(state: dict, selected_node: str | None) -> list:
-    return [
-        _render_rack_card(rack_label, node_ids, state, selected_node)
-        for rack_label, node_ids in get_rack_groups()
-    ]
-
-
-def _render_rack_card(rack_label, node_ids, state, selected_node):
-    node_states  = [state.get(nid, {}) for nid in node_ids]
-    worst_status = _worst_status(d.get("status", "--") for d in node_states)
-    total_power  = sum(d.get("total_power_w") or 0.0 for d in node_states)
-
+def _build_rack_card(rack_label, node_ids):
     return html.Div(
+        id={"type": "rack-card", "rack": rack_label},
         className="card rack-card",
-        style={"borderColor": _STATUS_TO_BORDER.get(worst_status, COLOR_DEFAULT)},
+        style={"borderColor": COLOR_DEFAULT},
         children=[
             html.Div(className="row", children=[
                 html.Span(rack_label, style={"color": COLOR_TEXT, "fontWeight": "700"}),
-                html.Span(f"{total_power:.1f} W", className="label",
-                          style={"marginLeft": "auto"}),
+                html.Span("-- W", id={"type": "rack-total-power", "rack": rack_label},
+                          className="label", style={"marginLeft": "auto"}),
             ]),
             html.Hr(),
             html.Div(className="node-grid", children=[
-                _render_node_card(nid, state.get(nid, {}), nid == selected_node)
-                for nid in node_ids
+                _build_node_card(nid) for nid in node_ids
             ]),
+        ],
+    )
+
+
+def _build_node_card(node_id):
+    return html.Button(
+        id={"type": "node-card-btn", "node_id": node_id},
+        n_clicks=0,
+        className="node-card",
+        style={"borderTopColor": COLOR_DEFAULT},
+        children=[
+            html.Div(node_id, className="node-card-id"),
+            html.Div("-- W", id={"type": "node-card-power", "node_id": node_id},
+                      className="label"),
+            html.Div("-- °C", id={"type": "node-card-temp", "node_id": node_id},
+                      className="label"),
+            html.Div("--", id={"type": "node-card-badge", "node_id": node_id},
+                      className="node-card-badge"),
         ],
     )
 
@@ -117,33 +137,6 @@ def _render_rack_card(rack_label, node_ids, state, selected_node):
 def _worst_status(statuses):
     ranked = [s for s in statuses if s in _STATUS_RANK]
     return max(ranked, key=lambda s: _STATUS_RANK[s]) if ranked else "--"
-
-
-def _render_node_card(node_id, data, is_selected):
-    status  = data.get("status", "--")
-    power   = data.get("total_power_w")
-    temp    = data.get("average_gpu_temp_c")
-
-    power_text    = f"{power:.1f} W" if power is not None else "-- W"
-    temp_text     = f"{temp:.1f} °C" if temp is not None else "-- °C"
-    forecast_text = _STATUS_TO_LABEL.get(status, "--")
-    border_color  = _STATUS_TO_BORDER.get(status, COLOR_DEFAULT)
-
-    class_name = "node-card" + (" node-card-selected" if is_selected else "")
-
-    return html.Button(
-        id={"type": "node-card-btn", "node_id": node_id},
-        n_clicks=0,
-        className=class_name,
-        style={"borderTopColor": border_color},
-        children=[
-            html.Div(node_id, className="node-card-id"),
-            html.Div(power_text, className="label"),
-            html.Div(temp_text, className="label"),
-            html.Div(forecast_text, className="node-card-badge",
-                      style={"color": border_color}),
-        ],
-    )
 
 
 def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
@@ -249,7 +242,65 @@ def _on_node_click(_n_clicks):
 
 
 @callback(
-    Output("rack-grid-container", "children"),
+    Output({"type": "node-card-power", "node_id": MATCH}, "children"),
+    Output({"type": "node-card-temp", "node_id": MATCH}, "children"),
+    Output({"type": "node-card-badge", "node_id": MATCH}, "children"),
+    Output({"type": "node-card-badge", "node_id": MATCH}, "style"),
+    Output({"type": "node-card-btn", "node_id": MATCH}, "style"),
+    Input("operator-state-store", "data"),
+    State({"type": "node-card-btn", "node_id": MATCH}, "id"),
+)
+def _on_node_card_data_update(state, btn_id):
+    data = (state or {}).get(btn_id["node_id"], {})
+
+    status = data.get("status", "--")
+    power  = data.get("total_power_w")
+    temp   = data.get("average_gpu_temp_c")
+
+    power_text    = f"{power:.1f} W" if power is not None else "-- W"
+    temp_text     = f"{temp:.1f} °C" if temp is not None else "-- °C"
+    forecast_text = _STATUS_TO_LABEL.get(status, "--")
+    border_color  = _STATUS_TO_BORDER.get(status, COLOR_DEFAULT)
+
+    return (
+        power_text,
+        temp_text,
+        forecast_text,
+        {"color": border_color},
+        {"borderTopColor": border_color},
+    )
+
+
+@callback(
+    Output({"type": "node-card-btn", "node_id": MATCH}, "className"),
+    Input("selected-node-store", "data"),
+    State({"type": "node-card-btn", "node_id": MATCH}, "id"),
+)
+def _on_node_selection_change(selected_node, btn_id):
+    is_selected = btn_id["node_id"] == selected_node
+    return "node-card" + (" node-card-selected" if is_selected else "")
+
+
+@callback(
+    Output({"type": "rack-card", "rack": MATCH}, "style"),
+    Output({"type": "rack-total-power", "rack": MATCH}, "children"),
+    Input("operator-state-store", "data"),
+    State({"type": "rack-card", "rack": MATCH}, "id"),
+)
+def _on_rack_card_data_update(state, rack_id):
+    node_ids = dict(get_rack_groups()).get(rack_id["rack"], [])
+    state = state or {}
+    node_states  = [state.get(nid, {}) for nid in node_ids]
+    worst_status = _worst_status(d.get("status", "--") for d in node_states)
+    total_power  = sum(d.get("total_power_w") or 0.0 for d in node_states)
+
+    return (
+        {"borderColor": _STATUS_TO_BORDER.get(worst_status, COLOR_DEFAULT)},
+        f"{total_power:.1f} W",
+    )
+
+
+@callback(
     Output("operator-summary-bar", "children"),
     Output("operator-detail-container", "children"),
     Input("operator-state-store", "data"),
@@ -258,7 +309,6 @@ def _on_node_click(_n_clicks):
 def _on_operator_render(state, selected_node):
     state = state or {}
     return (
-        render_rack_grid(state, selected_node),
         render_summary_cards(state),
         render_operator_detail(selected_node, state),
     )
