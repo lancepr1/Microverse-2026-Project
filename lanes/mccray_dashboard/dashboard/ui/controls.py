@@ -1,6 +1,6 @@
 """
-ui/controls.py — the toolbar above the three-column body: chart time-range
-buttons, the live/pause toggle, and the facility selector.
+ui/controls.py — chart time-range buttons, the live/pause toggle, and the
+facility selector.
 
 Dash callbacks are stateless per invocation, unlike DPG's button callbacks
 which mutated module-level lists directly. The selected time range,
@@ -9,6 +9,12 @@ tell the server which button was clicked; the callback below still routes
 those clicks into ui.charts' module-level state (_current_range,
 _auto_follow), which stays the single source of truth for the chart
 callback exactly like before.
+
+build_chart_controls() (time range + live/pause -- only meaningful next to
+the charts) and build_facility_control() (not wired to anything yet, kept
+visible globally) render into different places in the layout, but both
+read/write the same controls-store, so the one callback below still handles
+every click regardless of which panel it came from.
 """
 from dash import html, dcc, callback, Input, Output, State, ALL, ctx, no_update
 
@@ -24,7 +30,7 @@ DEFAULT_CONTROLS = {
 }
 
 
-def build_controls() -> html.Div:
+def build_chart_controls() -> html.Div:
     return html.Div(className="controls-bar", children=[
         dcc.Store(id="controls-store", data=dict(DEFAULT_CONTROLS)),
 
@@ -40,7 +46,11 @@ def build_controls() -> html.Div:
         ]),
 
         html.Button("Live", id="live-toggle-btn", n_clicks=0, className="btn"),
+    ])
 
+
+def build_facility_control() -> html.Div:
+    return html.Div(className="controls-bar", children=[
         html.Span("Facility:", className="label"),
         html.Div(className="btn-group", children=[
             html.Button(

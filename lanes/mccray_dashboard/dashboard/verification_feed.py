@@ -17,6 +17,14 @@ This module only ever reads that JSON back as plain dicts.
 
 Leiva's own dashboard-facing label mapping (verification.py docstring):
     trusted -> "good", suspect -> "suspect", failed -> "warning"
+
+init_verifier()/verify_sample() key their state by run_id, so multiple runs
+(e.g. all 16 node recordings replayed concurrently for the Operator tab) can
+be loaded at once without one node's data clobbering another's. Passing no
+run_id to verify_sample() falls back to whichever run_id was passed to
+init_verifier() most recently, which keeps the original single-node
+call pattern (data_feed.py's single-node poll(), and the existing tests)
+working unchanged.
 """
 import json
 import os
@@ -28,36 +36,38 @@ _RUNS_DIR = os.path.join(_REPO_ROOT, "runs")
 STATUS_LABELS = {"trusted": "good", "suspect": "suspect", "failed": "warning"}
 _STATUS_RANK = {"good": 0, "suspect": 1, "warning": 2}
 
-_by_index = {}
-_loaded = [False]
+_by_run = {}
+_current_run_id = [None]
 
 
 def init_verifier(run_id: str) -> None:
     """Load runs/<run_id>/verification.jsonl into memory, grouped by sample
     index. Safe to call even if the file doesn't exist yet (e.g. the offline
     generator hasn't been run for this run_id) -- verify_sample() then
-    falls back to "--" for every index."""
-    _by_index.clear()
+    falls back to "--" for every index in that run_id."""
     path = os.path.join(_RUNS_DIR, run_id, "verification.jsonl")
-    _loaded[0] = os.path.exists(path)
-    if not _loaded[0]:
-        return
+    by_index = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)["data"]
+                index = int(float(record["timestamp"]))
+                by_index.setdefault(index, []).append(record)
 
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)["data"]
-            index = int(float(record["timestamp"]))
-            _by_index.setdefault(index, []).append(record)
+    _by_run[run_id] = by_index
+    _current_run_id[0] = run_id
 
 
-def verify_sample(index: int) -> dict:
+def verify_sample(index: int, run_id: str | None = None) -> dict:
     """Aggregate every VerificationResult recorded for this sample index
-    into one rack-level {"status", "score", "reasons"} dict. Returns status
-    "--" when no verification data is available for this index."""
-    records = _by_index.get(index)
+    into one rack-level {"status", "score", "reasons"} dict. run_id defaults
+    to the most recent init_verifier() call. Returns status "--" when no
+    verification data is available for this index."""
+    run_id = run_id if run_id is not None else _current_run_id[0]
+    records = _by_run.get(run_id, {}).get(index)
     if not records:
         return {"status": "--", "score": None, "reasons": []}
 

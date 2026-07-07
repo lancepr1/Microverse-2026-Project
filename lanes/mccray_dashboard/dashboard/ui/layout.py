@@ -1,13 +1,14 @@
 """
-ui/layout.py — builds the Dash page layout: header, controls bar, and
-three-column body (rack status / charts / facility KPIs + rack detail +
-Blender feed).
+ui/layout.py — builds the Dash page layout: header, tab bar (Operator /
+Analyst / Alert log / Digital Twin, see ui/tabs.py), and the four tabs'
+content, all mounted at once (tabs only toggle CSS display -- see
+ui/tabs.py's docstring for why).
 
-There is no alert/notification panel in this version of the dashboard —
-that UI belonged to the old verification engine and was removed along with
-it (see README "Known gaps"). The header, charts, rack card, and KPI cards
-below are all driven directly by data_feed.poll() output, pushed in by the
-single polling callback in main.py.
+Below the tabs, the original single-node rack card / KPI panel / detail
+panel (ui/rack_cards.py, driven by data_feed's single-node get_rack_id()
+API) is left in place, still always visible regardless of which tab is
+selected -- it predates the Operator tab's 16-node grid and wasn't
+reassigned a home by the tab spec this was built against.
 """
 from dash import html, dcc
 
@@ -15,8 +16,10 @@ from data_feed import get_rack_id
 from ui.rack_cards import render_rack_card, render_detail_panel
 from ui.charts import build_figures, FRQ_HEIGHT, POWER_HEIGHT
 from ui.blender_feed import render_blender_feed
-from ui.controls import build_controls
-from ui.tabs import build_tab_bar, tab_content_style, TABS
+from ui.controls import build_chart_controls, build_facility_control
+from ui.tabs import build_tab_bar, tab_content_style
+from ui.operator import build_operator_tab
+from ui.alert_log import build_alert_log_tab
 
 POLL_INTERVAL_MS = 250
 
@@ -45,18 +48,30 @@ def build_layout() -> html.Div:
         html.Hr(),
 
         build_tab_bar(),
+        build_facility_control(),
 
         html.Div(className="tab-content-panels", children=[
             html.Div(
-                f"{label} tab — content coming in a later step.",
-                id=f"tab-content-{tab_id}",
-                className="dimmed-block tab-placeholder",
-                style=tab_content_style(tab_id),
-            )
-            for tab_id, label in TABS
+                build_operator_tab(),
+                id="tab-content-operator",
+                style=tab_content_style("operator"),
+            ),
+            html.Div(
+                _build_analyst_tab(rack_id, frq_fig, power_fig),
+                id="tab-content-analyst",
+                style=tab_content_style("analyst"),
+            ),
+            html.Div(
+                render_blender_feed(),
+                id="tab-content-digital-twin",
+                style=tab_content_style("digital-twin"),
+            ),
+            html.Div(
+                build_alert_log_tab(),
+                id="tab-content-alert-log",
+                style=tab_content_style("alert-log"),
+            ),
         ]),
-
-        build_controls(),
 
         html.Div(className="body-columns", children=[
 
@@ -72,28 +87,6 @@ def build_layout() -> html.Div:
                 html.Div(id="rack-history-container"),
             ]),
 
-            # CENTER — Charts
-            html.Div(className="panel center-panel", children=[
-                html.Div("Real-Time Signal Monitoring",
-                         className="panel-title"),
-                html.Hr(),
-                dcc.Store(id="chart-pause-store"),
-                html.Div(className="chart-frame", children=[
-                    html.Button("⏸", id="chart-pause-btn",
-                                className="chart-pause-btn"),
-                    html.Div(f"PDU Frequency — {rack_id}",
-                             className="chart-label"),
-                    dcc.Graph(id="frq-graph", figure=frq_fig,
-                              style={"height": f"{FRQ_HEIGHT}px"},
-                              config={"displayModeBar": False}),
-                    html.Div(f"Power Consumption — {rack_id}",
-                             className="chart-label"),
-                    dcc.Graph(id="power-graph", figure=power_fig,
-                              style={"height": f"{POWER_HEIGHT}px"},
-                              config={"displayModeBar": False}),
-                ]),
-            ]),
-
             # RIGHT — KPI + detail
             html.Div(className="panel right-panel", children=[
                 html.Div("Facility Metrics", className="panel-title"),
@@ -107,9 +100,37 @@ def build_layout() -> html.Div:
                 html.Div(id="detail-panel-container", className="detail-frame",
                          children=render_detail_panel({})),
             ]),
+        ]),
+    ])
 
-            # FAR RIGHT — Blender viewport
-            render_blender_feed(),
+
+def _build_analyst_tab(rack_id, frq_fig, power_fig) -> html.Div:
+    return html.Div(children=[
+        html.Div(
+            "Signal analysis and historical data — select a node or "
+            "time range to drill down",
+            className="dimmed-block",
+        ),
+        build_chart_controls(),
+        html.Div(className="panel center-panel", children=[
+            html.Div("Real-Time Signal Monitoring",
+                      className="panel-title"),
+            html.Hr(),
+            dcc.Store(id="chart-pause-store"),
+            html.Div(className="chart-frame", children=[
+                html.Button("⏸", id="chart-pause-btn",
+                            className="chart-pause-btn"),
+                html.Div(f"PDU Frequency — {rack_id}",
+                          className="chart-label"),
+                dcc.Graph(id="frq-graph", figure=frq_fig,
+                          style={"height": f"{FRQ_HEIGHT}px"},
+                          config={"displayModeBar": False}),
+                html.Div(f"Power Consumption — {rack_id}",
+                          className="chart-label"),
+                dcc.Graph(id="power-graph", figure=power_fig,
+                          style={"height": f"{POWER_HEIGHT}px"},
+                          config={"displayModeBar": False}),
+            ]),
         ]),
     ])
 
