@@ -448,6 +448,63 @@ def test_small_deployment_isolated_node_still_fails():
           b.status == "trusted", b.status)
 
 
+def test_coordinated_attack_below_majority_still_caught():
+    """Adversarial test: an attacker who has compromised 7 of 16 nodes
+    (below the 50% SYNC_EVENT_MIN_FRACTION requirement, even though
+    it's well above the absolute SYNC_EVENT_MIN_NODES=4 floor)
+    coordinates a simultaneous fake step across those 7 nodes only.
+    This must still be caught as FAILED -- confirms min_fraction, not
+    just the absolute floor, is doing real work here."""
+    nodes = tuple(f"node_{i}" for i in range(16))
+    records = make_records(20, node_ids=nodes)
+    compromised = nodes[:7]
+    for node in compromised:
+        records[10][f"{node}_cpu-0[W]"] = 90.0 + 25.0
+    results = run_verifier(records)
+    r10 = results[10]
+    still_failed = [find(r10, f"{n}_cpu-0[W]").status for n in compromised]
+    check("Adversarial: 7/16 coordinated attack (below 50% fraction) still caught as FAILED",
+          all(s == "failed" for s in still_failed), still_failed)
+
+
+def test_coordinated_attack_at_majority_evades_KNOWN_LIMITATION():
+    """
+    KNOWN LIMITATION, not a bug -- documented and tested deliberately.
+    An attacker who has compromised a full 50% majority of nodes (8 of
+    16) and coordinates a simultaneous fake step across exactly those
+    nodes DOES evade to SUSPECT, because the corroboration logic can
+    only observe statistical agreement across nodes -- it has no way
+    to know WHY they agree. This is the real, quantified bar: half the
+    entire deployment, not a small fixed number of nodes.
+
+    The real-world defense against this is operational, not
+    algorithmic: compromising 8 independent physical machines
+    simultaneously is a dramatically higher bar for an attacker than
+    compromising 1, even though the verifier's math genuinely cannot
+    distinguish "8 machines really are checkpointing together" from
+    "an attacker made 8 machines lie together."
+
+    If this test ever starts failing (the attack stops evading),
+    that's a signal worth revisiting whether this documented tradeoff
+    changed -- not a signal to just update the test and move on.
+    """
+    nodes = tuple(f"node_{i}" for i in range(16))
+    records = make_records(20, node_ids=nodes)
+    compromised = nodes[:8]
+    for node in compromised:
+        records[10][f"{node}_cpu-0[W]"] = 90.0 + 25.0
+    results = run_verifier(records)
+    r10 = results[10]
+
+    evaded = [find(r10, f"{n}_cpu-0[W]").status for n in compromised]
+    check("KNOWN LIMITATION: 8/16 (50%) coordinated attack evades to SUSPECT",
+          all(s == "suspect" for s in evaded), evaded)
+
+    untouched = [find(r10, f"{n}_cpu-0[W]").status for n in nodes[8:]]
+    check("Uncompromised nodes remain TRUSTED during the coordinated attack",
+          all(s == "trusted" for s in untouched), untouched)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
