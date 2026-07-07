@@ -2,35 +2,45 @@
 ui/rack_cards.py — the rack status card (left panel) and its detail
 breakdown (right panel "Rack Inspection" section).
 
-Only the raw telemetry fields produced by data_feed.poll() are displayed
-here: PDU frequency, total power, and per-GPU/per-CPU power and
-temperature. There is no health/verification status yet — `status` is read
-from the state dict if present and shown as-is, but nothing in this repo
-sets it. That field is a placeholder for a verification/alerting module to
-populate later; until then the card simply shows "--".
+Displays the raw telemetry fields produced by data_feed.poll() -- PDU
+frequency, total power, per-GPU/per-CPU power and temperature -- plus the
+verification status/reasons that data_feed.poll() now merges in from
+verification_feed.verify_sample() (Leiva's Verifier, one call per replayed
+sample). "good"/"suspect"/"warning" are Leiva's own documented
+presentation-layer labels for TRUSTED/SUSPECT/FAILED.
 """
 from dash import html
 
-RACK_ID = "Rack_01"
+from data_feed import get_rack_id
 
 COLOR_LABEL  = "rgb(90, 90, 90)"
 COLOR_DIMMED = "rgb(140, 140, 140)"
 COLOR_TEXT   = "rgb(30, 30, 30)"
+COLOR_GOOD   = "rgb(0, 150, 70)"
+COLOR_SUSPECT = "rgb(200, 150, 0)"
+COLOR_WARNING = "rgb(200, 50, 50)"
 
 FRQ_HZ_DEFAULT  = "-- Hz"
 POWER_W_DEFAULT = "-- W"
 TEMP_C_DEFAULT  = "-- °C"
 
+_STATUS_COLORS = {
+    "good":    COLOR_GOOD,
+    "suspect": COLOR_SUSPECT,
+    "warning": COLOR_WARNING,
+}
+
 
 def status_color(status):
-    """No status values are produced anywhere in this repo yet; this always
-    falls through to COLOR_LABEL until a verification module starts setting
-    state[RACK_ID]["status"]."""
-    return {}.get(status, COLOR_LABEL)
+    """Maps verification_feed's status labels (good/suspect/warning) to a
+    display color; unknown/placeholder values (e.g. "--") fall through to
+    COLOR_LABEL."""
+    return _STATUS_COLORS.get(status, COLOR_LABEL)
 
 
 def render_rack_card(state: dict) -> html.Div:
-    data = state.get(RACK_ID, {})
+    rack_id = get_rack_id()
+    data = state.get(rack_id, {})
 
     frq         = data.get("frq_hz")
     total_power = data.get("total_power_w")
@@ -43,7 +53,7 @@ def render_rack_card(state: dict) -> html.Div:
 
     return html.Div(className="card", children=[
         html.Div(className="row", children=[
-            html.Span(RACK_ID, style={"color": COLOR_TEXT}),
+            html.Span(str(rack_id), style={"color": COLOR_TEXT}),
             html.Span(str(status), style={"color": status_color(status), "marginLeft": "auto"}),
         ]),
         html.Hr(),
@@ -61,7 +71,8 @@ def render_rack_card(state: dict) -> html.Div:
 
 
 def render_detail_panel(state: dict) -> html.Div:
-    data = state.get(RACK_ID, {})
+    rack_id = get_rack_id()
+    data = state.get(rack_id, {})
 
     frq         = data.get("frq_hz")
     total_power = data.get("total_power_w")
@@ -70,10 +81,15 @@ def render_detail_panel(state: dict) -> html.Div:
     gpu_temp    = data.get("gpu_temp_c", {})
     cpu_power   = data.get("cpu_power_w", {})
     status      = data.get("status", "--")
+    reasons     = data.get("verification_reasons", [])
 
     frq_text   = f"{frq:.2f} Hz" if frq is not None else FRQ_HZ_DEFAULT
     power_text = f"{total_power:.1f} W" if total_power is not None else POWER_W_DEFAULT
     temp_text  = f"{avg_temp:.1f} °C" if avg_temp is not None else TEMP_C_DEFAULT
+    reasons_text = (
+        "; ".join(f"{component}: {reason}" for component, reason in reasons)
+        if reasons else "All channels nominal"
+    )
 
     gpu_lines = [
         f"GPU {gpu_id}: {gpu_power.get(gpu_id, 0.0):.1f} W, "
@@ -86,10 +102,11 @@ def render_detail_panel(state: dict) -> html.Div:
     ]
 
     return html.Div(children=[
-        html.Div(RACK_ID, style={"color": COLOR_TEXT}),
+        html.Div(str(rack_id), style={"color": COLOR_TEXT}),
         html.Hr(),
 
         _detail_row("Status", str(status), status_color(status)),
+        _detail_row("Verification", reasons_text),
         _detail_row("FRQ", frq_text),
         _detail_row("Total Power", power_text),
         _detail_row("Average GPU Temp", temp_text),

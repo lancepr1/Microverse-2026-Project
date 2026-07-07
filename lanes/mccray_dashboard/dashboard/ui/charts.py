@@ -18,13 +18,13 @@ from collections import deque
 
 import plotly.graph_objects as go
 
+from data_feed import get_rack_id
+
 MAX_POINTS      = 90_000
 SAMPLE_INTERVAL = 1.0
 FRQ_NOMINAL_HZ  = 60.0
 FRQ_HEIGHT      = 200
 POWER_HEIGHT    = 150
-
-RACK_ID = "Rack_01"
 
 COLOR_LINE      = "rgb(0, 150, 70)"
 COLOR_THRESHOLD = "rgb(180, 150, 0)"
@@ -99,7 +99,7 @@ def update_charts(state: dict):
     if not state:
         return
 
-    data = state.get(RACK_ID)
+    data = state.get(get_rack_id())
     if not data:
         return
 
@@ -192,7 +192,7 @@ def _compute_figures():
 def _build_frq_figure(fx, fy, x_range, ticks, now_t):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=fx, y=fy, mode="lines", name=RACK_ID,
+        x=fx, y=fy, mode="lines", name=get_rack_id(),
         line=dict(color=COLOR_LINE, width=1.5)
     ))
     nominal_x_max = max(now_t, 1)
@@ -208,7 +208,7 @@ def _build_frq_figure(fx, fy, x_range, ticks, now_t):
 def _build_power_figure(px, py, x_range, ticks):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=px, y=py, mode="lines", name=RACK_ID,
+        x=px, y=py, mode="lines", name=get_rack_id(),
         line=dict(color=COLOR_LINE, width=1.5)
     ))
     _apply_layout(fig, x_range, ticks, y_title="Watts")

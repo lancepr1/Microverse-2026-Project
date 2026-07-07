@@ -11,12 +11,11 @@ single polling callback in main.py.
 """
 from dash import html, dcc
 
+from data_feed import get_rack_id
 from ui.rack_cards import render_rack_card, render_detail_panel
 from ui.charts import build_figures, FRQ_HEIGHT, POWER_HEIGHT
 from ui.blender_feed import render_blender_feed
 from ui.controls import build_controls
-
-RACK_ID = "Rack_01"
 
 POLL_INTERVAL_MS = 250
 
@@ -29,6 +28,7 @@ COLOR_GREEN = "rgb(0, 150, 70)"
 
 
 def build_layout() -> html.Div:
+    rack_id = get_rack_id()
     frq_fig, power_fig = build_figures()
 
     return html.Div(className="app", children=[
@@ -68,12 +68,12 @@ def build_layout() -> html.Div:
                 html.Div(className="chart-frame", children=[
                     html.Button("⏸", id="chart-pause-btn",
                                 className="chart-pause-btn"),
-                    html.Div(f"PDU Frequency — {RACK_ID}",
+                    html.Div(f"PDU Frequency — {rack_id}",
                              className="chart-label"),
                     dcc.Graph(id="frq-graph", figure=frq_fig,
                               style={"height": f"{FRQ_HEIGHT}px"},
                               config={"displayModeBar": False}),
-                    html.Div(f"Power Consumption — {RACK_ID}",
+                    html.Div(f"Power Consumption — {rack_id}",
                              className="chart-label"),
                     dcc.Graph(id="power-graph", figure=power_fig,
                               style={"height": f"{POWER_HEIGHT}px"},
@@ -110,9 +110,9 @@ def _kpi_card(label, value, value_id):
 
 def render_header_and_kpis(state: dict):
     """Returns (header_frq, kpi_frq, kpi_power, kpi_temp) text for the
-    Output tuple in main.py's polling callback. Assumes state[RACK_ID]
+    Output tuple in main.py's polling callback. Assumes state[get_rack_id()]
     exists — callers should only invoke this when poll() returned data."""
-    data = state[RACK_ID]
+    data = state[get_rack_id()]
 
     frq         = data.get("frq_hz")
     total_power = data.get("total_power_w")

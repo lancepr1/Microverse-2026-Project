@@ -9,8 +9,7 @@ from datetime import datetime
 from dash import html, callback, Input, Output, State
 
 import history_store
-
-RACK_ID = "Rack_01"
+from data_feed import get_rack_id
 
 COLOR_LABEL = "rgb(90, 90, 90)"
 COLOR_TEXT  = "rgb(30, 30, 30)"
@@ -54,5 +53,5 @@ def _on_history_toggle(_n_clicks, is_open):
     if not is_open:
         return is_open, None, "History"
 
-    rows = history_store.get_recent(RACK_ID)
+    rows = history_store.get_recent(get_rack_id())
     return is_open, render_history_table(rows), "Hide History"

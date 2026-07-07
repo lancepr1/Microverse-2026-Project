@@ -15,13 +15,13 @@ from ui.rack_cards import render_rack_card, render_detail_panel
 import ui.controls      # noqa: F401 -- registers the controls-store callback
 import ui.blender_feed  # noqa: F401 -- registers the Blender image callback
 import ui.rack_history  # noqa: F401 -- registers the History toggle callback
-from data_feed import init_feed, poll, RACK_ID
+from data_feed import init_feed, poll, get_rack_id
 from history_store import init_history_db, record_sample
 
 app = Dash(__name__, title="AFRL Microverse — Data Center Dashboard")
-app.layout = build_layout()
 init_feed()
 init_history_db()
+app.layout = build_layout()
 
 
 @app.callback(
@@ -39,7 +39,7 @@ def on_tick(_n):
     state = poll()
     if state:
         update_charts(state)
-        record_sample(RACK_ID, state[RACK_ID])
+        record_sample(get_rack_id(), state[get_rack_id()])
 
     frq_fig, power_fig = get_figures()
 
