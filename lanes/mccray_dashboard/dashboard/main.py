@@ -15,6 +15,7 @@ from ui.rack_cards import render_rack_card, render_detail_panel
 import ui.controls      # noqa: F401 -- registers the controls-store callback
 import ui.blender_feed  # noqa: F401 -- registers the Blender image callback
 import ui.rack_history  # noqa: F401 -- registers the History toggle callback
+import ui.tabs          # noqa: F401 -- registers the tab-switch callbacks
 from data_feed import init_feed, poll, get_rack_id
 from history_store import init_history_db, record_sample
 

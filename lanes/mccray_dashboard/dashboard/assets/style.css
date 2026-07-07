@@ -168,6 +168,28 @@ body {
   overflow: auto;
 }
 
+.tab-bar {
+  display: flex;
+  align-items: center;
+  padding: 8px 0 4px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.btn-active,
+.btn-active:hover {
+  background: var(--color-green);
+  color: rgb(255, 255, 255);
+  border-color: var(--color-green);
+}
+
+.tab-content-panels {
+  padding: 10px 0;
+}
+
+.tab-placeholder {
+  padding: 4px 0;
+}
+
 .blender-feed {
   width: 300px;
   height: 720px;

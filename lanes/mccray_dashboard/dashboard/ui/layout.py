@@ -16,6 +16,7 @@ from ui.rack_cards import render_rack_card, render_detail_panel
 from ui.charts import build_figures, FRQ_HEIGHT, POWER_HEIGHT
 from ui.blender_feed import render_blender_feed
 from ui.controls import build_controls
+from ui.tabs import build_tab_bar, tab_content_style, TABS
 
 POLL_INTERVAL_MS = 250
 
@@ -42,6 +43,18 @@ def build_layout() -> html.Div:
                       style={"color": COLOR_GREEN}),
         ]),
         html.Hr(),
+
+        build_tab_bar(),
+
+        html.Div(className="tab-content-panels", children=[
+            html.Div(
+                f"{label} tab — content coming in a later step.",
+                id=f"tab-content-{tab_id}",
+                className="dimmed-block tab-placeholder",
+                style=tab_content_style(tab_id),
+            )
+            for tab_id, label in TABS
+        ]),
 
         build_controls(),
 
