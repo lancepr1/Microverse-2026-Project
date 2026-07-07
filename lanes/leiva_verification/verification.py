@@ -38,6 +38,22 @@ information along -- not to gate whether data keeps moving.
     if BOTH a range and a step-size problem hit the same channel in the
     same window, they merge into one result naming both.
 
+   11. Cross-node corroboration (_apply_synchronized_event_correlation)
+                               NEW -- runs after all NLR checks merge.
+                               A pure step-size (discontinuity) failure
+                               is downgraded from FAILED to SUSPECT when
+                               enough OTHER independent nodes show the
+                               same step on the same physical channel in
+                               the same window -- real synchronized
+                               system events (checkpoints, gradient-sync
+                               barriers, job startup) produce exactly
+                               this signature, and an attacker targeting
+                               one node cannot fake agreement from many
+                               other real nodes. Never downgrades a
+                               channel that is ALSO out of range or
+                               violating monotonicity -- corroboration
+                               only softens pure step-size calls.
+
 Status mapping (per metrics.py -- only FAILED counts as a detection):
   TRUSTED  passes cleanly (dashboard-facing label: "good")
   SUSPECT  ENF confidence in the soft zone, no hard check failed
@@ -121,8 +137,20 @@ GPU_TEMP_MAX_STEP_C = 15.0   # placeholder max plausible swing per ENF window
 _ENF_WINDOW_SECONDS = 2.0
 CPU_UJ_MAX_STEP_UJ = CPU_POWER_CEILING_W * _ENF_WINDOW_SECONDS * 1_000_000 * 1.5
 
+# ---------------------------------------------------------------------------
+# PLACEHOLDER thresholds -- cross-node corroboration for step-size
+# (continuity) failures. NOT yet validated against Ethan's coordinated
+# multi-node attack scenarios -- see _apply_synchronized_event_correlation.
+# ---------------------------------------------------------------------------
+
+SYNC_EVENT_MIN_NODES    = 4     # CEILING on the absolute-node requirement --
+                                 # scales DOWN for smaller deployments, see
+                                 # _apply_synchronized_event_correlation
+SYNC_EVENT_MIN_FRACTION = 0.5   # AND must be at least this fraction of nodes present
+
 # Score values
 SCORE_TRUSTED      = 0.95
+SCORE_SUSPECT       = 0.50
 SCORE_FAILED_HARD  = 0.05
 SCORE_FAILED_DRIFT = 0.10
 
@@ -565,6 +593,122 @@ def _merge_key_results(*result_dicts: dict[str, tuple[str, str]]) -> dict[str, t
     return merged
 
 
+def _bare_channel_name(key: str) -> str:
+    """
+    Strips the node-id prefix from a full column name, returning just
+    the physical channel -- e.g. "x3105c0s37b0n0_cpu-0[W]" -> "cpu-0[W]".
+    Used to group the SAME physical channel across DIFFERENT nodes so
+    cross-node corroboration can be checked.
+    """
+    for marker in ("_gpu-", "_cpu-"):
+        idx = key.find(marker)
+        if idx != -1:
+            return key[idx + 1:]
+    return key
+
+
+def _is_pure_discontinuity(reason: str) -> bool:
+    """
+    True only if DISCONTINUITY is the SOLE problem on this channel.
+    A channel that is ALSO out of range, rolling back, or energy-
+    spiking is never eligible for corroboration downgrade below --
+    those are absolute plausibility violations, independent of
+    whatever every other node happens to be doing.
+    """
+    if "DISCONTINUITY" not in reason:
+        return False
+    disqualifying = ("OUT OF RANGE", "MONOTONICITY VIOLATION", "ENERGY SPIKE")
+    return not any(d in reason for d in disqualifying)
+
+
+def _apply_synchronized_event_correlation(
+    merged: dict[str, tuple[str, str]],
+    max_min_nodes: int = SYNC_EVENT_MIN_NODES,
+    min_fraction: float = SYNC_EVENT_MIN_FRACTION,
+) -> dict[str, tuple[str, str]]:
+    """
+    Cross-node corroboration for step-size (continuity) failures.
+
+    Independent hardware does not coincidentally step together. If a
+    large, otherwise-implausible step shows up on the SAME physical
+    channel (e.g. cpu-0[W]) on many DIFFERENT nodes in the SAME
+    window, that is itself strong evidence of a real synchronized
+    system event -- a checkpoint save, a gradient-sync barrier, job
+    startup -- rather than tampering. An attacker targeting one node
+    cannot make many other independent nodes' real telemetry jump in
+    lockstep too, so requiring corroboration doesn't weaken detection
+    of an actual single-node attack -- it only softens the call on
+    events that many nodes agree on simultaneously.
+
+    Only PURE discontinuity failures are eligible (see
+    _is_pure_discontinuity) -- corroboration never rescues a channel
+    that is also out of range or violating monotonicity.
+
+    The absolute-node requirement SCALES with how many nodes actually
+    have this channel present this window, rather than being a fixed
+    number:
+
+        effective_min_nodes = max(2, min(max_min_nodes, total_nodes))
+
+    At or above max_min_nodes total nodes (e.g. a 16-node rack), this
+    is identical to the fixed floor before -- nothing changes for a
+    full deployment. Below that, it scales down so a small deployment
+    (e.g. 2 nodes) can still corroborate off full unanimous agreement,
+    instead of a fixed floor that's mathematically unreachable with
+    that few nodes. Never drops below 2 -- a single node's own reading
+    cannot "corroborate" itself, so a 1-node deployment can never
+    trigger this regardless of max_min_nodes.
+
+    This is a real security tradeoff, not a free improvement: on a
+    small deployment, an attacker who has compromised ALL of that
+    deployment's nodes could coordinate tampering to mimic this exact
+    signature and get downgraded to SUSPECT. The smaller the
+    deployment, the smaller the number of nodes an attacker needs to
+    compromise to fake corroboration. Still requires BOTH the scaled
+    node count AND min_fraction (share of nodes present) to downgrade.
+
+    Downgrades matching entries from FAILED to SUSPECT (not TRUSTED --
+    this is still worth watching, just not a confident hard failure)
+    and appends a note naming exactly how many nodes corroborated it.
+    """
+    by_channel: dict[str, list[str]] = collections.defaultdict(list)
+    for key in merged:
+        by_channel[_bare_channel_name(key)].append(key)
+
+    result = dict(merged)
+
+    for bare, keys in by_channel.items():
+        total_nodes = len(keys)
+        failed_keys = [
+            k for k in keys
+            if merged[k][0] == _FAILED and _is_pure_discontinuity(merged[k][1])
+        ]
+        if not failed_keys:
+            continue
+
+        count = len(failed_keys)
+        fraction = count / total_nodes if total_nodes else 0.0
+        effective_min_nodes = max(2, min(max_min_nodes, total_nodes))
+
+        if count >= effective_min_nodes and fraction >= min_fraction:
+            for k in failed_keys:
+                orig_status, orig_reason = merged[k]
+                result[k] = (
+                    VerificationStatus.SUSPECT.value,
+                    f"{orig_reason} | SYNCHRONIZED EVENT: corroborated by "
+                    f"{count}/{total_nodes} nodes stepping on {bare} in the "
+                    f"same window (required >={effective_min_nodes} of "
+                    f"{total_nodes} present) -- likely a real system-wide "
+                    f"event (checkpoint/sync/startup), not tampering "
+                    f"(PLACEHOLDER thresholds, not yet validated against "
+                    f"coordinated multi-node attack scenarios)"
+                )
+
+    return result
+
+
+
+
 # ---------------------------------------------------------------------------
 # Public Verifier
 # ---------------------------------------------------------------------------
@@ -744,8 +888,21 @@ class Verifier:
                 self._gpu_temp_continuity_check.check(record_dict),
             )
 
+            # Cross-node corroboration: downgrades a step-size failure
+            # from FAILED to SUSPECT only when enough OTHER independent
+            # nodes show the same pattern in this same window -- see
+            # _apply_synchronized_event_correlation for why this is
+            # safe (an attacker on one node can't fake agreement from
+            # many other real nodes).
+            merged = _apply_synchronized_event_correlation(merged)
+
             for key, (status, reason) in merged.items():
-                score = SCORE_TRUSTED if status == VerificationStatus.TRUSTED.value else SCORE_FAILED_HARD
+                if status == VerificationStatus.TRUSTED.value:
+                    score = SCORE_TRUSTED
+                elif status == VerificationStatus.SUSPECT.value:
+                    score = SCORE_SUSPECT
+                else:
+                    score = SCORE_FAILED_HARD
                 results.append(VerificationResult(
                     timestamp=ts,
                     component_id=f"{self._component_id}/{key}",

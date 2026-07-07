@@ -229,6 +229,52 @@ def _nlr_mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+# RAPL energy counters are fixed-width hardware registers: true_total is
+# stored as (true_total % _RAPL_WRAP_CEILING_UJ), so the raw readings
+# periodically drop back near zero even though real energy use only ever
+# increases. A plain modulo can't invert this -- the wrap count itself is
+# lost -- so instead we watch for the characteristic near-ceiling drop and
+# add the ceiling back on every time it happens, exactly the "phase
+# unwrap" trick used for cyclic/angular data. Must run BEFORE aggregation:
+# aggregating (averaging) raw wrapped values blends pre-wrap and post-wrap
+# numbers together whenever a wrap lands mid-window, producing a
+# meaningless window value and a bogus window-to-window "drop" that
+# doesn't match the true wrap size.
+_RAPL_WRAP_CEILING_UJ = 65_500_000_000
+_RAPL_WRAP_TOLERANCE_UJ = 2_000_000_000
+
+
+def _unwrap_uj_series(
+    values: list[float],
+    wrap_ceiling: float = _RAPL_WRAP_CEILING_UJ,
+    wrap_tolerance: float = _RAPL_WRAP_TOLERANCE_UJ,
+) -> list[float]:
+    """
+    Converts a raw RAPL energy counter sequence (periodically wraps back
+    near zero) into a continuous, always-increasing sequence (true
+    cumulative energy). Call this on each channel's full raw sample
+    sequence before aggregating into ENF-aligned windows.
+
+    Detects a wrap whenever a reading drops by roughly wrap_ceiling from
+    the previous raw reading, and from that point on adds
+    (wrap_count * wrap_ceiling) to every subsequent raw value. Handles
+    any number of wraps across the file, in order.
+    """
+    if not values:
+        return values
+
+    unwrapped = [values[0]]
+    wrap_count = 0
+    for i in range(1, len(values)):
+        prev_raw = values[i - 1]
+        curr_raw = values[i]
+        if curr_raw < prev_raw - wrap_tolerance:
+            wrap_count += 1
+        unwrapped.append(curr_raw + wrap_count * wrap_ceiling)
+
+    return unwrapped
+
+
 def _extract_node_id(filename: str) -> Optional[str]:
     """
     Extracts the node identifier from a wattmeter log filename.
@@ -520,6 +566,21 @@ def _parse_rapl_log(
                 cpu0_w=cpu0_w,             cpu0_core_w=cpu0_core_w,
                 cpu1_w=cpu1_w,             cpu1_core_w=cpu1_core_w,
             ))
+
+    # Unwrap each uJ channel's full raw sequence BEFORE any aggregation
+    # happens. Must be done here, not in _aggregate_cpu, so averaging
+    # never sees a wrapped value in the first place.
+    if rows:
+        unwrapped_cpu0_uj      = _unwrap_uj_series([r.cpu0_uj      for r in rows])
+        unwrapped_cpu0_core_uj = _unwrap_uj_series([r.cpu0_core_uj for r in rows])
+        unwrapped_cpu1_uj      = _unwrap_uj_series([r.cpu1_uj      for r in rows])
+        unwrapped_cpu1_core_uj = _unwrap_uj_series([r.cpu1_core_uj for r in rows])
+        for i, r in enumerate(rows):
+            r.cpu0_uj      = unwrapped_cpu0_uj[i]
+            r.cpu0_core_uj = unwrapped_cpu0_core_uj[i]
+            r.cpu1_uj      = unwrapped_cpu1_uj[i]
+            r.cpu1_core_uj = unwrapped_cpu1_core_uj[i]
+
     return rows
 
 
@@ -581,7 +642,7 @@ def load_nlr_multi(
     Auto-detects the NLR sample rate from the first file so the correct
     number of raw samples are averaged per ENF-aligned window:
         training workloads  ->  5 Hz ->  10 samples per window
-        inference workloads -> 10 Hz ->  20 samples per window
+        inference workloads -> 10 Hz -> 20 samples per window
 
     Parameters
     ----------
