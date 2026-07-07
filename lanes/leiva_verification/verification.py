@@ -92,8 +92,8 @@ from microverse_core.contracts import (
 # and paste the output here.
 # ---------------------------------------------------------------------------
 
-CONFIDENCE_TRUSTED = 0.70
-CONFIDENCE_SUSPECT = 0.50
+CONFIDENCE_TRUSTED = 0.25  # calibrated against Dev1_ENF_Hr01, cleaned via clean_enf() -- median confidence of real cleaned data was 0.2475, NOT 0.70. See mentor-meeting masking experiment (2026-07) for full context.
+CONFIDENCE_SUSPECT = -0.15  # tightened from initial -0.30 test specifically to escalate a real replay-attack test case to FAILED rather than leaving it as SUSPECT -- verify against more attack scenarios before treating as final.
 
 # Raw frequency plausibility -- checked BEFORE normalization since
 # normalization absorbs extreme values into the signature shape.
