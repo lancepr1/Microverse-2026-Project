@@ -36,9 +36,9 @@ from data_feed import list_node_ids, poll_all
 
 RACK_SIZE = 4
 
-COLOR_TEXT    = "rgb(30, 30, 30)"
-COLOR_LABEL   = "rgb(90, 90, 90)"
-COLOR_DEFAULT = "rgb(210, 210, 210)"
+COLOR_TEXT    = "#e2e8f0"
+COLOR_LABEL   = "#4a5568"
+COLOR_DEFAULT = "#2d3748"
 COLOR_NOMINAL = "rgb(0, 150, 70)"
 COLOR_WARNING = "rgb(200, 150, 0)"
 COLOR_ALERT   = "rgb(200, 50, 50)"
@@ -93,7 +93,7 @@ def render_summary_cards(state: dict) -> list:
 def _summary_card(label, value, color=COLOR_LABEL):
     return html.Div(className="card kpi-card", children=[
         html.Div(label, className="label"),
-        html.Div(value, style={"color": color}),
+        html.Div(value, className="stat-value", style={"color": color}),
     ])
 
 
@@ -106,7 +106,7 @@ def _build_rack_card(rack_label, node_ids):
             html.Div(className="row", children=[
                 html.Span(rack_label, style={"color": COLOR_TEXT, "fontWeight": "700"}),
                 html.Span("-- W", id={"type": "rack-total-power", "rack": rack_label},
-                          className="label", style={"marginLeft": "auto"}),
+                          className="mono-value", style={"marginLeft": "auto"}),
             ]),
             html.Hr(),
             html.Div(className="node-grid", children=[
@@ -125,9 +125,9 @@ def _build_node_card(node_id):
         children=[
             html.Div(node_id, className="node-card-id"),
             html.Div("-- W", id={"type": "node-card-power", "node_id": node_id},
-                      className="label"),
+                      className="mono-value"),
             html.Div("-- °C", id={"type": "node-card-temp", "node_id": node_id},
-                      className="label"),
+                      className="mono-value"),
             html.Div("--", id={"type": "node-card-badge", "node_id": node_id},
                       className="node-card-badge"),
         ],
@@ -197,7 +197,7 @@ def _rack_label_for(node_id):
 def _detail_row(label, value, color=COLOR_TEXT):
     return html.Div(className="row", children=[
         html.Span(f"{label}:", className="label"),
-        html.Span(value, style={"color": color}),
+        html.Span(value, className="mono-value", style={"color": color}),
     ])
 
 
@@ -216,7 +216,7 @@ def _anomaly_score_bar(score):
         html.Div(className="score-bar-track", children=[
             html.Div(className="score-bar-fill", style={"width": f"{pct}%", "background": color}),
         ]),
-        html.Span(label),
+        html.Span(label, className="mono-value"),
     ])
 
 

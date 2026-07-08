@@ -9,15 +9,49 @@
   font-weight: 700;
 }
 
+/* ==========================================================================
+   Palette -- defined once here; every rule below consumes these variables
+   so the whole theme can be re-tuned in one place. Moves 4-7 (status
+   badges, live pulse, tab underline, AI box) are defined now but not all
+   wired to elements until later steps -- see the NOC restyle session plan.
+   ========================================================================== */
 :root {
-  --color-text: rgb(30, 30, 30);
-  --color-label: rgb(90, 90, 90);
-  --color-dimmed: rgb(140, 140, 140);
-  --color-green: rgb(0, 150, 70);
-  --color-red: rgb(210, 45, 45);
-  --color-bg: rgb(250, 250, 250);
-  --color-card-bg: rgb(255, 255, 255);
-  --color-border: rgb(210, 210, 210);
+  /* base surfaces (move 1) */
+  --color-bg:        #0a0e14;  /* page background -- near-black, blue tint */
+  --color-card-bg:   #0d1420;  /* panels/cards -- one step lighter */
+  --color-border:    #1c2533;  /* hairline borders between zones */
+
+  /* text */
+  --color-text:      #e2e8f0;  /* primary readable text on dark */
+  --color-label:     #4a5568;  /* muted slate micro-labels (move 3) */
+  --color-dimmed:    #64748b;  /* muted secondary/placeholder prose */
+
+  /* accents */
+  --color-green:     #4ade80;  /* live/nominal accent */
+  --color-red:       #f87171;
+  --color-accent:    #60a5fa;  /* tab underline / interactive accent (move 7) */
+
+  /* monospace stack for telemetry values (move 2) -- system-available
+     fonts only, no CDN dependency */
+  --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace;
+
+  /* status badge families (move 4) -- background/border/text share one hue */
+  --status-nominal-text:   #4ade80;
+  --status-nominal-bg:     #0a1f12;
+  --status-nominal-border: #166534;
+
+  --status-warning-text:   #fbbf24;
+  --status-warning-bg:     #1f1a0a;
+  --status-warning-border: #a16207;
+
+  --status-alert-text:     #f87171;
+  --status-alert-bg:       #1f0a0a;
+  --status-alert-border:   #b91c1c;
+
+  /* AI explanation box -- distinct from telemetry (additional touches) */
+  --color-ai-bg:     #0f0a1a;
+  --color-ai-border: #3f2d5c;
+  --color-ai-label:  #a78bfa;
 }
 
 * {
@@ -30,6 +64,12 @@ body {
   color: var(--color-text);
   font-family: "Inter", sans-serif;
   font-size: 14px;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 6px 0;
 }
 
 .app {
@@ -47,8 +87,29 @@ body {
   font-weight: 700;
 }
 
-.label {
+/* Micro-labels (move 3): section labels, table headers, stat labels --
+   small uppercase muted-slate text. Also covers .label's other role as a
+   value holder ONLY where that role has been split out to .mono-value
+   below (see ui/operator.py, ui/analyst.py) -- anywhere still using
+   .label alone is a genuine label, not a value. */
+.label,
+.section-title,
+.chart-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: 600;
   color: var(--color-label);
+}
+
+/* Monospace telemetry values (move 2): numbers, node IDs, wattage,
+   temperature, frequency, timestamps. */
+.mono-value,
+.node-card-id,
+.stat-value,
+#header-frq-hz,
+.alert-table td {
+  font-family: var(--font-mono);
 }
 
 .controls-bar {
@@ -66,7 +127,7 @@ body {
 
 .btn {
   border: 1px solid var(--color-border);
-  background: rgb(230, 230, 230);
+  background: var(--color-card-bg);
   color: var(--color-text);
   border-radius: 4px;
   padding: 3px 10px;
@@ -76,7 +137,7 @@ body {
 }
 
 .btn:hover {
-  background: rgb(210, 210, 210);
+  background: #141c2b;
 }
 
 .panel {
@@ -105,11 +166,6 @@ body {
   height: auto;
 }
 
-.chart-label {
-  margin: 6px 0 4px;
-  color: var(--color-text);
-}
-
 .chart-pause-btn {
   position: absolute;
   top: 0;
@@ -118,7 +174,7 @@ body {
   width: 24px;
   height: 24px;
   border: 1px solid var(--color-border);
-  background: rgb(230, 230, 230);
+  background: var(--color-card-bg);
   color: var(--color-label);
   border-radius: 50%;
   font-size: 12px;
@@ -127,10 +183,11 @@ body {
 }
 
 .chart-pause-btn:hover {
-  background: rgb(210, 210, 210);
+  background: #141c2b;
 }
 
 .card {
+  background: var(--color-card-bg);
   border: 1px solid var(--color-border);
   border-radius: 4px;
   padding: 8px;
@@ -146,10 +203,6 @@ body {
   gap: 12px;
   align-items: baseline;
   flex-wrap: wrap;
-}
-
-.section-title {
-  margin-top: 10px;
 }
 
 .dimmed-block {
@@ -223,7 +276,7 @@ body {
 }
 
 .node-card:hover {
-  background: rgb(245, 245, 245);
+  background: #101a29;
 }
 
 .node-card-selected {
@@ -252,7 +305,7 @@ body {
   flex: 1;
   height: 8px;
   min-width: 60px;
-  background: rgb(230, 230, 230);
+  background: #141c2b;
   border-radius: 4px;
   overflow: hidden;
 }
@@ -289,10 +342,17 @@ body {
 }
 
 .alert-table th {
-  color: var(--color-text);
+  color: var(--color-label);
   position: sticky;
   top: 0;
   background: var(--color-card-bg);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.alert-table td {
+  color: var(--color-text);
 }
 
 .blender-feed {

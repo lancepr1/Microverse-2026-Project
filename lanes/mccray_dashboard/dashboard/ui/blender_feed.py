@@ -19,20 +19,17 @@ IMG_PATH    = "/tmp/blender_viewport.png"
 FEED_WIDTH  = 300
 FEED_HEIGHT = 720
 
-COLOR_LABEL  = "rgb(90, 90, 90)"
-COLOR_DIMMED = "rgb(140, 140, 140)"
-
 _last_mtime = [0.0]
 
 
 def render_blender_feed() -> html.Div:
     return html.Div(className="blender-feed", children=[
         dcc.Interval(id="blender-interval", interval=500),
-        html.Div("Live Digital Twin", style={"color": COLOR_LABEL}),
+        html.Div("Live Digital Twin", className="label"),
         html.Img(id="blender-img", className="blender-img",
                  style={"display": "none"}),
         html.Div("DT loading...", id="blender-loading-text",
-                  style={"color": COLOR_DIMMED}),
+                  className="dimmed-block"),
     ])
 
 

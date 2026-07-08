@@ -93,7 +93,7 @@ def _build_rack_panel(rack_label: str, node_ids: list[str]) -> html.Div:
     return html.Div(className="panel rack-chart-panel", children=[
         html.Div(className="row", children=[
             html.Span(rack_label, className="panel-title"),
-            html.Span("-- W", id=f"{slug}-total-power", className="label",
+            html.Span("-- W", id=f"{slug}-total-power", className="mono-value",
                       style={"marginLeft": "auto"}),
         ]),
         html.Hr(),
