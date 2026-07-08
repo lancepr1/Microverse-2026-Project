@@ -88,14 +88,21 @@ body {
   overflow: auto;
 }
 
-.center-panel {
-  width: 700px;
-}
-
 .chart-frame {
   position: relative;
   display: flex;
   flex-direction: column;
+}
+
+.rack-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.rack-chart-panel {
+  height: auto;
 }
 
 .chart-label {

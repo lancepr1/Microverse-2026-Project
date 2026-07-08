@@ -16,7 +16,7 @@ visible globally) render into different places in the layout, but both
 read/write the same controls-store, so the one callback below still handles
 every click regardless of which panel it came from.
 """
-from dash import html, dcc, callback, Input, Output, State, ALL, ctx, no_update
+from dash import html, dcc, callback, Input, Output, State, ALL, ctx
 
 from ui import charts
 
@@ -91,17 +91,9 @@ def _on_control_click(_time_clicks, _live_clicks, _facility_clicks, store):
     return store, ("Live" if store["auto_follow"] else "Paused")
 
 
-@callback(
-    Output("chart-pause-btn", "children"),
-    Input("chart-pause-store", "data"),
-    prevent_initial_call=True,
-)
-def _on_chart_pause(data):
-    action = (data or {}).get("action")
-    if action == "pause":
-        charts.set_paused(True)
-        return "▶"
-    if action == "resume":
-        charts.set_paused(False)
-        return "⏸"
-    return no_update
+# Note: "Live"/"Paused" above toggles auto_follow -- whether the x-axis
+# keeps sliding with the selected Time Range window, or sits unwindowed so
+# Plotly's own pan/zoom sticks. That's a different axis from
+# ui/analyst.py's "⏸ Pause"/"▶ Resume" button, which freezes the whole
+# Analyst tab (buffer growth and all eight figures) regardless of the
+# Time Range or auto_follow state.

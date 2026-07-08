@@ -20,11 +20,11 @@ def test_data_feed_imports_and_exposes_poll():
 
 
 def test_ui_charts_imports():
-    from ui.charts import update_charts, reset_charts, build_figures, get_figures
-    assert callable(update_charts)
-    assert callable(reset_charts)
-    assert len(build_figures()) == 2
-    assert len(get_figures()) == 2
+    from ui.charts import update_node_history, build_rack_power_figure, get_node_history_lengths
+    assert callable(update_node_history)
+    assert callable(get_node_history_lengths)
+    fig = build_rack_power_figure(["node-a", "node-b"])
+    assert len(fig.data) == 2
 
 
 def test_ui_controls_imports():
