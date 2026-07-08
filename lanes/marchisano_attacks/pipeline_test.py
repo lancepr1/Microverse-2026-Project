@@ -79,7 +79,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from microverse_core.data_loaders import (
     load_enf,
-    clean_enf,
+    combined_smooth,
     discover_nlr_pairs,
     load_nlr_multi,
     build_combined_records,
@@ -130,19 +130,21 @@ OUT_PATH = REPO_ROOT / "data" / "combined" / "run_2node.jsonl"
 
 
 def main():
-    # ---- Step 1: load ENF, then clean it -- BEFORE this file goes ----
+    # ---- Step 1: load ENF, then smooth it -- BEFORE this file goes ----
     # ---- anywhere near attack injection. Must stay in this exact  ----
-    # ---- position: clean_enf() should never run on a file that's  ----
-    # ---- already been through attack injection (verified 2026-07 -- ----
-    # ---- doing so silently erases spike-type attacks with zero    ----
-    # ---- detection). verify_file.py never imports clean_enf at all,----
-    # ---- so this is the only place it should ever be called.      ----
+    # ---- position: combined_smooth() should never run on a file   ----
+    # ---- that's already been through attack injection (verified   ----
+    # ---- 2026-07 with the earlier clean_enf() -- doing so silently----
+    # ---- erases spike-type attacks with zero detection; the same  ----
+    # ---- rule applies here). verify_file.py never imports         ----
+    # ---- combined_smooth at all, so this is the only place it     ----
+    # ---- should ever be called.                                   ----
     print(f"Loading ENF from {ENF_PATH} ...")
     enf = load_enf(ENF_PATH)
     print(f"  -> {len(enf)} ENF readings")
 
-    print("Cleaning ENF (physical-range check + Hampel filter) ...")
-    enf = clean_enf(enf)
+    print("Smoothing ENF (Hampel outlier correction + Butterworth lowpass) ...")
+    enf = combined_smooth(enf)
     print(f"  -> done")
 
     # ---- Step 2: discover node pairs, optionally narrow to a subset ----

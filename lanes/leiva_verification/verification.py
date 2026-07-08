@@ -92,8 +92,8 @@ from microverse_core.contracts import (
 # and paste the output here.
 # ---------------------------------------------------------------------------
 
-CONFIDENCE_TRUSTED = 0.25  # calibrated against Dev1_ENF_Hr01, cleaned via clean_enf() -- median confidence of real cleaned data was 0.2475, NOT 0.70. See mentor-meeting masking experiment (2026-07) for full context.
-CONFIDENCE_SUSPECT = -0.55  # RETUNED (2026-07) against real ground-truth attack data (attack_1.jsonl) to hit a <=5% ENF false-positive rate target. Swept -0.30 through -0.70 in 0.05 steps against 1780 known-clean + 20 known-attacked windows; -0.55 is the FIRST value crossing under 5% (measured 4.55% FPR), chosen as the minimal loosening needed rather than going further, since additional loosening past this point only weakens sensitivity with no benefit toward the stated target. Recall held at 100% across the entire sweep -- this file's attack type (FRQ zero-out) is caught by ENFNominalRangeCheck regardless of this threshold. TRADEOFF: a replay-splice attack (tested synthetically, not in this file) dipped to ~-0.20 confidence -- it was already not reaching hard FAILED status at -0.30, so this further loosening costs nothing additional against that specific known case, but reduces sensitivity to any UNTESTED attack type with a shallower confidence dip. Revisit if more real attack-type coverage becomes available.
+CONFIDENCE_TRUSTED = 0.93  # RECALIBRATED (2026-07) for combined_smooth() output (was 0.25, calibrated against the older clean_enf() pipeline with mean confidence ~0.25). combined_smooth()'s mean/median confidence on real cleaned data is ~0.97-0.98; P10 of that distribution was measured at 0.9392. Old value would provide near-zero discrimination against the new, much tighter baseline.
+CONFIDENCE_SUSPECT = 0.85  # RECALIBRATED (2026-07) for combined_smooth() output (was -0.55). Matches the single_window_threshold validated in test_combined_smoothing.py -- comfortably below the measured P1 of clean data (0.9215), catches the sustained attack and (with LocalCUSUMDetector below) the quick-splice sweep. Re-verify against real ground-truth attack data before treating as final, same caveat as the value it replaces.
 
 # Raw frequency plausibility -- checked BEFORE normalization since
 # normalization absorbs extreme values into the signature shape.
@@ -102,8 +102,20 @@ NOMINAL_HZ = 60.0
 NOMINAL_TOLERANCE_HZ = 2.0
 
 CUSUM_THRESHOLD  = 5.0
-CUSUM_BASELINE   = 0.30
+CUSUM_BASELINE   = 0.03  # RECALIBRATED (2026-07) for combined_smooth() output (was 0.30). Mean(1-confidence) on real smoothed clean data measured 0.0216-0.0320 across two independent test runs. Note: _DriftMonitor self-calibrates from real history via calibrate() after warmup_windows, so this static value mainly matters during the warmup period -- still updated to avoid a wildly mismatched default.
 CUSUM_HISTORY    = 60
+
+# Local CUSUM detector -- separate from _DriftMonitor above, which
+# accumulates over an ENTIRE file's history and reacts too slowly to a
+# short, localized attack. This one accumulates over a SHORT sliding
+# window specifically to catch the "several nearby windows each show a
+# partial confidence dip, none alone crosses CONFIDENCE_SUSPECT" pattern
+# found in quick-splice testing (2026-07): single-window thresholding
+# alone caught as few as 4/22 windows on a 44-second splice; this
+# detector caught 22/22 on every tested run, 2-44 seconds, with 0.00%
+# false positives on clean data. See combined_smoothing.py test suite.
+LOCAL_CUSUM_WINDOW_SIZE = 10
+LOCAL_CUSUM_THRESHOLD   = 2.0
 
 # ---------------------------------------------------------------------------
 # Tunable thresholds -- NLR side
@@ -318,6 +330,10 @@ class _DriftMonitor:
         return self._cusum
 
     @property
+    def baseline(self) -> float:
+        return self._baseline
+
+    @property
     def sample_count(self) -> int:
         return self._n
 
@@ -335,6 +351,58 @@ class _DriftMonitor:
         if self._history:
             self._baseline = statistics.mean(self._history)
             self._cusum = 0.0
+
+    def reset(self) -> None:
+        self._cusum = 0.0
+
+
+class _LocalCUSUMDetector:
+    """
+    Added 2026-07, alongside combined_smooth() in data_loaders.py.
+
+    Accumulates (1 - confidence) over a SHORT sliding window (unlike
+    _DriftMonitor above, which accumulates over the entire file's
+    history and is tuned for slow, genuine long-term drift). This one
+    is tuned for short, localized anomalies -- specifically the
+    "several nearby windows each show a partial confidence dip, none
+    alone crosses CONFIDENCE_SUSPECT" pattern found during quick-splice
+    testing, where single-window thresholding degraded badly on longer
+    (but still well under a minute) sustained anomalies.
+
+    Resets automatically once confidence returns to normal for a
+    stretch, so it re-arms for the next potential anomaly rather than
+    staying latched the way a naive running total would.
+    """
+
+    def __init__(
+        self,
+        window_size: int = LOCAL_CUSUM_WINDOW_SIZE,
+        baseline: float = CUSUM_BASELINE,
+        cusum_threshold: float = LOCAL_CUSUM_THRESHOLD,
+    ):
+        self._window_size = window_size
+        self._baseline = baseline
+        self._cusum_threshold = cusum_threshold
+        self._history: collections.deque = collections.deque(maxlen=window_size)
+        self._cusum: float = 0.0
+
+    @property
+    def cusum(self) -> float:
+        return self._cusum
+
+    def record(self, confidence: float) -> bool:
+        """Records one confidence value, returns True if flagged."""
+        deviation = 1.0 - confidence
+        self._history.append(deviation)
+        self._cusum = max(0.0, self._cusum + (deviation - self._baseline))
+        if len(self._history) == self._window_size and deviation < self._baseline:
+            self._cusum = max(0.0, self._cusum - self._baseline)
+        return self._cusum > self._cusum_threshold
+
+    def calibrate(self, baseline: float) -> None:
+        """Allows the same runtime-calibrated baseline _DriftMonitor uses to be shared here."""
+        self._baseline = baseline
+        self._cusum = 0.0
 
     def reset(self) -> None:
         self._cusum = 0.0
@@ -755,6 +823,7 @@ class Verifier:
         self._range_check         = _ENFRangeCheck()
         self._continuity_check    = _ENFContinuityCheck()
         self._drift_monitor       = _DriftMonitor()
+        self._local_cusum         = _LocalCUSUMDetector()
 
         # NLR checks -- multi-node aware, no configuration needed
         self._nlr_range_check        = _NLRRangeCheck()
@@ -837,6 +906,15 @@ class Verifier:
         self._windows_processed += 1
         if self._windows_processed == self._warmup_windows:
             self._drift_monitor.calibrate()
+            # NOTE: deliberately NOT sharing this calibration with
+            # _local_cusum. Tested (2026-07): a 10-window sample produced
+            # a baseline of 0.00273, ~8x tighter than the true whole-file
+            # baseline (0.02163) -- fine for _drift_monitor (threshold=5.0
+            # has enough buffer to absorb it) but caused _local_cusum
+            # (threshold=2.0, much less forgiving) to false-positive on
+            # 89.83% of completely clean data. _local_cusum keeps using
+            # its well-calibrated static default (CUSUM_BASELINE, measured
+            # directly from real whole-file data) instead.
 
         if self._drift_monitor.is_drifting():
             enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
@@ -846,6 +924,28 @@ class Verifier:
                 f"over {self._drift_monitor.sample_count} windows"
             )
             self._drift_monitor.reset()
+
+        # Local CUSUM -- short-horizon, catches localized anomalies
+        # (quick splices, short sustained fabrications) that individual
+        # windows don't always cross CONFIDENCE_SUSPECT for on their own.
+        # See _LocalCUSUMDetector docstring.
+        #
+        # IMPORTANT: deliberately does NOT reset() on every firing (unlike
+        # _drift_monitor above). Testing found that resetting immediately
+        # after each detection made this re-accumulate from zero every
+        # time, causing it to miss most of a longer anomaly's duration
+        # (dropped back to matching single-window-only performance, e.g.
+        # 4/22 on a 44-second splice instead of the validated 22/22).
+        # Letting it stay latched until enough good data naturally decays
+        # it back down is the behavior that was actually tested and
+        # validated in combined_smoothing.py's test suite.
+        if self._local_cusum.record(anchor.confidence):
+            enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+            enf_reasons.append(
+                f"LOCAL ANOMALY: CUSUM={self._local_cusum.cusum:.3f} "
+                f"exceeded threshold={LOCAL_CUSUM_THRESHOLD} "
+                f"within a {LOCAL_CUSUM_WINDOW_SIZE}-window span"
+            )
 
         # Soft confidence tier only applies if nothing hard already failed
         if enf_status == VerificationStatus.TRUSTED.value and anchor.confidence < CONFIDENCE_TRUSTED:

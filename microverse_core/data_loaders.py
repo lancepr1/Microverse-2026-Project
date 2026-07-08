@@ -235,6 +235,143 @@ def clean_enf(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Combined smoothing -- OPTIONAL, explicit step, added 2026-07. Supersedes
+# clean_enf() for production use (does everything clean_enf() does via
+# hampel_correct() below, PLUS a Butterworth lowpass stage on top) --
+# clean_enf() is kept in this file unchanged for anyone who wants the
+# simpler, lighter-weight version or wants to compare behavior directly.
+#
+# Requires scipy (clean_enf() and everything else in this file is
+# stdlib-only -- this is the one function in data_loaders.py that needs
+# `pip install scipy`).
+#
+# Validated (2026-07) against real ENF data:
+#   - Clean-data confidence: raw ~0.25 mean -> smoothed ~0.97-0.98 mean,
+#     replicated on two independent machines/scipy installs.
+#   - Sustained 20-sample attack: caught reliably (single-window recall
+#     varied 45%-100% across test runs due to minor scipy/floating-point
+#     version differences near a threshold boundary; local CUSUM
+#     detector caught 20/20 on every run).
+#   - Quick-splice sweep (2-44 seconds): local CUSUM caught 100% at every
+#     tested length on every run; single-window thresholding alone
+#     degrades badly on longer durations (as low as 4/22 in one run) --
+#     this is why LocalCUSUMDetector (in verification.py) exists
+#     alongside the confidence check, not as a replacement for it.
+#   - False positives on clean data: 0.00% in every tested run.
+#
+# Same architectural rule as clean_enf(): must be called EXACTLY ONCE,
+# at ingestion, before the file goes anywhere near attack injection.
+# Never call this on a file that may have already been tampered with.
+# ---------------------------------------------------------------------------
+
+def hampel_correct(
+    values: list[float],
+    window: int = 11,
+    n_sigmas: float = 2.0,
+) -> list[float]:
+    """
+    Same mechanism as clean_enf()'s Hampel stage -- detects outliers via
+    rolling median + MAD, replaces via linear interpolation between
+    nearest good neighbors (never a flat median -- see clean_enf()'s
+    docstring for why that matters). Factored out here so combined_smooth()
+    can call it as a distinct stage before the lowpass filter.
+    """
+    n = len(values)
+    if n == 0:
+        return values
+    bad = [False] * n
+    k = 1.4826
+    for i in range(n):
+        lo = max(0, i - window)
+        hi = min(n, i + window + 1)
+        w = [values[j] for j in range(lo, hi) if not bad[j]]
+        if len(w) < 2:
+            continue
+        med = statistics.median(w)
+        mad = statistics.median([abs(v - med) for v in w])
+        threshold = n_sigmas * k * mad
+        if threshold > 0 and abs(values[i] - med) > threshold:
+            bad[i] = True
+
+    result = list(values)
+    bad_idx = [i for i, b in enumerate(bad) if b]
+    for i in bad_idx:
+        lo = i - 1
+        while lo >= 0 and bad[lo]:
+            lo -= 1
+        hi = i + 1
+        while hi < n and bad[hi]:
+            hi += 1
+        if lo >= 0 and hi < n:
+            frac = (i - lo) / (hi - lo)
+            result[i] = values[lo] + frac * (values[hi] - values[lo])
+        elif lo >= 0:
+            result[i] = values[lo]
+        elif hi < n:
+            result[i] = values[hi]
+
+    return result
+
+
+def lowpass_filter_enf(
+    values: list[float],
+    sample_rate_hz: float = 0.5,
+    cutoff_hz: float = 0.02,
+    order: int = 10,
+    nominal: float = 60.0,
+) -> list[float]:
+    """
+    Zero-phase Butterworth lowpass filter applied to the
+    deviation-from-nominal series. Every output point is a weighted
+    combination of real input points -- unlike clean_enf(), nothing is
+    discarded or replaced with guesswork.
+
+    cutoff_hz is the cutoff of the filter APPLIED TO THIS TIME SERIES
+    (how fast the ENF reading is allowed to change) -- NOT the same
+    kind of quantity as clean_enf()'s physical_floor/physical_ceiling
+    (which bound the allowable VALUE range). Different knob, different
+    units, do not confuse the two.
+
+    Uses filtfilt (forward-backward) for zero phase shift -- a
+    forward-only filter would introduce a time lag, which would corrupt
+    AnchorExtractor's window alignment.
+    """
+    from scipy.signal import butter, filtfilt
+
+    nyquist = sample_rate_hz / 2.0
+    normalized_cutoff = min(cutoff_hz / nyquist, 0.99)
+
+    deviation = [v - nominal for v in values]
+    b, a = butter(order, normalized_cutoff, btype="low")
+    smoothed_deviation = filtfilt(b, a, deviation)
+
+    return [d + nominal for d in smoothed_deviation]
+
+
+def combined_smooth(
+    values: list[float],
+    hampel_window: int = 11,
+    hampel_n_sigmas: float = 2.0,
+    lowpass_cutoff_hz: float = 0.02,
+    lowpass_order: int = 10,
+    sample_rate_hz: float = 0.5,
+) -> list[float]:
+    """
+    Stage 1 (hampel_correct, outlier removal) then Stage 2
+    (lowpass_filter_enf, smoothing). This is the recommended, validated
+    ENF cleaning step going forward -- call this from pipeline_test.py
+    in place of clean_enf().
+    """
+    corrected = hampel_correct(values, window=hampel_window, n_sigmas=hampel_n_sigmas)
+    return lowpass_filter_enf(
+        corrected,
+        sample_rate_hz=sample_rate_hz,
+        cutoff_hz=lowpass_cutoff_hz,
+        order=lowpass_order,
+    )
+
+
 # --------------------------------------------------------------------------
 # NLR wattmeter log loaders -- multi-node aware, variable sample rate
 #

@@ -1,0 +1,338 @@
+  [    2] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 23.46W between windows, exceeds max plausible step 16.0W
+  [    2] rack_00/x3102c0s5b0n0_cpu-1[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-1[W] stepped 18.07W between windows, exceeds max plausible step 16.0W
+  [    9] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 26.96W between windows, exceeds max plausible step 16.0W
+  [    9] rack_00/x3102c0s25b0n0_cpu-1[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-1[W] stepped 24.77W between windows, exceeds max plausible step 16.0W
+  [   12] rack_00/x3102c0s25b0n0_cpu-0[W]          SUSPECT  score=0.500  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 18.92W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [   12] rack_00/x3102c0s5b0n0_cpu-0[W]           SUSPECT  score=0.500  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 19.77W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [   12] rack_00/x3102c0s5b0n0_cpu-1[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-1[W] stepped 17.08W between windows, exceeds max plausible step 16.0W
+  [   13] rack_00/x3102c0s25b0n0_cpu-0[W]          SUSPECT  score=0.500  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 18.05W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [   13] rack_00/x3102c0s5b0n0_cpu-0[W]           SUSPECT  score=0.500  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 19.77W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [   13] rack_00/x3102c0s5b0n0_cpu-1[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-1[W] stepped 17.01W between windows, exceeds max plausible step 16.0W
+  [   17] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8211 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [   18] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8081 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [   20] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 25.61W between windows, exceeds max plausible step 16.0W
+  [   20] rack_00/x3102c0s25b0n0_cpu-1[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-1[W] stepped 20.62W between windows, exceeds max plausible step 16.0W
+  [   33] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 19.41W between windows, exceeds max plausible step 16.0W
+  [   33] rack_00/x3102c0s25b0n0_cpu-1[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-1[W] stepped 16.79W between windows, exceeds max plausible step 16.0W
+  [   35] rack_00/ENF                              SUSPECT  score=0.882  confidence 0.8819 below normal threshold 0.93 -- monitoring
+  [   35] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 20.21W between windows, exceeds max plausible step 16.0W
+  [   35] rack_00/x3102c0s5b0n0_cpu-1[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-1[W] stepped 18.56W between windows, exceeds max plausible step 16.0W
+  [   36] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7853 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [   36] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 16.01W between windows, exceeds max plausible step 16.0W
+  [   37] rack_00/ENF                              SUSPECT  score=0.887  confidence 0.8875 below normal threshold 0.93 -- monitoring
+  [   37] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 20.82W between windows, exceeds max plausible step 16.0W
+  [   37] rack_00/x3102c0s5b0n0_cpu-1[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-1[W] stepped 17.79W between windows, exceeds max plausible step 16.0W
+  [   39] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 25.63W between windows, exceeds max plausible step 16.0W
+  [   64] rack_00/x3102c0s25b0n0_cpu-0[W]          SUSPECT  score=0.500  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 29.95W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [   64] rack_00/x3102c0s5b0n0_cpu-0[W]           SUSPECT  score=0.500  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 17.34W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [   65] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 35.47W between windows, exceeds max plausible step 16.0W
+  [   89] rack_00/ENF                              SUSPECT  score=0.896  confidence 0.8963 below normal threshold 0.93 -- monitoring
+  [   90] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7845 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [   91] rack_00/ENF                              SUSPECT  score=0.867  confidence 0.8668 below normal threshold 0.93 -- monitoring
+  [  105] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8177 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  106] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8237 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  116] rack_00/ENF                              SUSPECT  score=0.888  confidence 0.8881 below normal threshold 0.93 -- monitoring
+  [  117] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7795 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  118] rack_00/ENF                              SUSPECT  score=0.875  confidence 0.8747 below normal threshold 0.93 -- monitoring
+  [  125] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 19.07W between windows, exceeds max plausible step 16.0W
+  [  130] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 18.80W between windows, exceeds max plausible step 16.0W
+  [  133] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 31.88W between windows, exceeds max plausible step 16.0W
+  [  134] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 28.98W between windows, exceeds max plausible step 16.0W
+  [  135] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 25.11W between windows, exceeds max plausible step 16.0W
+  [  136] rack_00/x3102c0s25b0n0_cpu-0[W]          SUSPECT  score=0.500  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 27.99W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [  136] rack_00/x3102c0s5b0n0_cpu-0[W]           SUSPECT  score=0.500  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 27.19W between windows, exceeds max plausible step 16.0W | SYNCHRONIZED EVENT: corroborated by 2/2 nodes stepping on cpu-0[W] in the same window (required >=2 of 2 present) -- likely a real system-wide event (checkpoint/sync/startup), not tampering (PLACEHOLDER thresholds, not yet validated against coordinated multi-node attack scenarios)
+  [  137] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 18.22W between windows, exceeds max plausible step 16.0W
+  [  140] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8416 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  140] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 26.05W between windows, exceeds max plausible step 16.0W
+  [  141] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7920 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  141] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 17.54W between windows, exceeds max plausible step 16.0W
+  [  142] rack_00/ENF                              SUSPECT  score=0.915  confidence 0.9154 below normal threshold 0.93 -- monitoring
+  [  143] rack_00/x3102c0s25b0n0_cpu-0[W]          FAILED   score=0.050  DISCONTINUITY: x3102c0s25b0n0_cpu-0[W] stepped 35.80W between windows, exceeds max plausible step 16.0W
+  [  144] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 33.65W between windows, exceeds max plausible step 16.0W
+  [  180] rack_00/ENF                              SUSPECT  score=0.919  confidence 0.9190 below normal threshold 0.93 -- monitoring
+  [  181] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7923 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  182] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8355 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  192] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8444 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  193] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8010 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  194] rack_00/ENF                              SUSPECT  score=0.916  confidence 0.9165 below normal threshold 0.93 -- monitoring
+  [  207] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8490 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  208] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7939 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  209] rack_00/ENF                              SUSPECT  score=0.910  confidence 0.9098 below normal threshold 0.93 -- monitoring
+  [  217] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8211 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  218] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8129 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  219] rack_00/ENF                              FAILED   score=0.050  DRIFT DETECTED: CUSUM=5.006 exceeded threshold=5.0 over 220 windows
+  [  236] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8447 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  237] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7977 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  238] rack_00/ENF                              SUSPECT  score=0.919  confidence 0.9186 below normal threshold 0.93 -- monitoring
+  [  251] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8122 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  252] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8254 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  268] rack_00/ENF                              SUSPECT  score=0.889  confidence 0.8895 below normal threshold 0.93 -- monitoring
+  [  269] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7850 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  270] rack_00/ENF                              SUSPECT  score=0.880  confidence 0.8799 below normal threshold 0.93 -- monitoring
+  [  285] rack_00/ENF                              SUSPECT  score=0.859  confidence 0.8594 below normal threshold 0.93 -- monitoring
+  [  286] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7884 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  287] rack_00/ENF                              SUSPECT  score=0.908  confidence 0.9078 below normal threshold 0.93 -- monitoring
+  [  301] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8277 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  302] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8075 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  317] rack_00/ENF                              SUSPECT  score=0.864  confidence 0.8635 below normal threshold 0.93 -- monitoring
+  [  318] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7889 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  319] rack_00/ENF                              SUSPECT  score=0.903  confidence 0.9031 below normal threshold 0.93 -- monitoring
+  [  332] rack_00/ENF                              SUSPECT  score=0.862  confidence 0.8622 below normal threshold 0.93 -- monitoring
+  [  333] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7951 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  334] rack_00/ENF                              SUSPECT  score=0.902  confidence 0.9016 below normal threshold 0.93 -- monitoring
+  [  342] rack_00/ENF                              SUSPECT  score=0.906  confidence 0.9063 below normal threshold 0.93 -- monitoring
+  [  343] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7891 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  344] rack_00/ENF                              SUSPECT  score=0.851  confidence 0.8509 below normal threshold 0.93 -- monitoring
+  [  359] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8460 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  360] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7965 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  361] rack_00/ENF                              SUSPECT  score=0.917  confidence 0.9169 below normal threshold 0.93 -- monitoring
+  [  377] rack_00/ENF                              SUSPECT  score=0.903  confidence 0.9032 below normal threshold 0.93 -- monitoring
+  [  378] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7885 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  379] rack_00/ENF                              FAILED   score=0.050  DRIFT DETECTED: CUSUM=5.008 exceeded threshold=5.0 over 380 windows
+  [  393] rack_00/ENF                              SUSPECT  score=0.905  confidence 0.9050 below normal threshold 0.93 -- monitoring
+  [  394] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7891 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  395] rack_00/ENF                              SUSPECT  score=0.856  confidence 0.8555 below normal threshold 0.93 -- monitoring
+  [  405] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8247 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  406] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8182 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  419] rack_00/ENF                              SUSPECT  score=0.908  confidence 0.9079 below normal threshold 0.93 -- monitoring
+  [  420] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7925 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  421] rack_00/ENF                              SUSPECT  score=0.854  confidence 0.8535 below normal threshold 0.93 -- monitoring
+  [  433] rack_00/ENF                              SUSPECT  score=0.852  confidence 0.8515 below normal threshold 0.93 -- monitoring
+  [  434] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7921 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  435] rack_00/ENF                              SUSPECT  score=0.908  confidence 0.9084 below normal threshold 0.93 -- monitoring
+  [  448] rack_00/ENF                              SUSPECT  score=0.897  confidence 0.8975 below normal threshold 0.93 -- monitoring
+  [  449] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7605 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  450] rack_00/ENF                              SUSPECT  score=0.865  confidence 0.8650 below normal threshold 0.93 -- monitoring
+  [  489] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8285 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  490] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7825 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  491] rack_00/ENF                              SUSPECT  score=0.916  confidence 0.9157 below normal threshold 0.93 -- monitoring
+  [  509] rack_00/x3102c0s5b0n0_cpu-0[W]           FAILED   score=0.050  DISCONTINUITY: x3102c0s5b0n0_cpu-0[W] stepped 18.66W between windows, exceeds max plausible step 16.0W
+  [  510] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8233 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  511] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8152 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  527] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8397 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  528] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7971 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  529] rack_00/ENF                              SUSPECT  score=0.921  confidence 0.9206 below normal threshold 0.93 -- monitoring
+  [  556] rack_00/ENF                              SUSPECT  score=0.881  confidence 0.8810 below normal threshold 0.93 -- monitoring
+  [  557] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7923 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  558] rack_00/ENF                              SUSPECT  score=0.860  confidence 0.8598 below normal threshold 0.93 -- monitoring
+  [  559] rack_00/ENF                              SUSPECT  score=0.923  confidence 0.9231 below normal threshold 0.93 -- monitoring
+  [  560] rack_00/ENF                              SUSPECT  score=0.917  confidence 0.9174 below normal threshold 0.93 -- monitoring
+  [  561] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8299 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  562] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7615 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid | DRIFT DETECTED: CUSUM=5.122 exceeded threshold=5.0 over 563 windows
+  [  563] rack_00/ENF                              SUSPECT  score=0.889  confidence 0.8886 below normal threshold 0.93 -- monitoring
+  [  611] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8384 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  612] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7960 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  613] rack_00/ENF                              SUSPECT  score=0.922  confidence 0.9217 below normal threshold 0.93 -- monitoring
+  [  637] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8071 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  638] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8024 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  639] rack_00/ENF                              SUSPECT  score=0.924  confidence 0.9236 below normal threshold 0.93 -- monitoring
+  [  644] rack_00/ENF                              SUSPECT  score=0.851  confidence 0.8505 below normal threshold 0.93 -- monitoring
+  [  645] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7997 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  646] rack_00/ENF                              SUSPECT  score=0.908  confidence 0.9084 below normal threshold 0.93 -- monitoring
+  [  663] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8403 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  664] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7960 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  665] rack_00/ENF                              SUSPECT  score=0.924  confidence 0.9239 below normal threshold 0.93 -- monitoring
+  [  682] rack_00/ENF                              SUSPECT  score=0.904  confidence 0.9039 below normal threshold 0.93 -- monitoring
+  [  683] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7862 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  684] rack_00/ENF                              SUSPECT  score=0.865  confidence 0.8652 below normal threshold 0.93 -- monitoring
+  [  698] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8187 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  699] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8204 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  710] rack_00/ENF                              SUSPECT  score=0.917  confidence 0.9171 below normal threshold 0.93 -- monitoring
+  [  711] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7927 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  712] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8421 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  731] rack_00/ENF                              SUSPECT  score=0.864  confidence 0.8637 below normal threshold 0.93 -- monitoring
+  [  732] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7853 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  733] rack_00/ENF                              SUSPECT  score=0.906  confidence 0.9057 below normal threshold 0.93 -- monitoring
+  [  756] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8376 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  757] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7919 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  758] rack_00/ENF                              SUSPECT  score=0.920  confidence 0.9202 below normal threshold 0.93 -- monitoring
+  [  770] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8233 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  771] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8121 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  772] rack_00/ENF                              FAILED   score=0.050  DRIFT DETECTED: CUSUM=5.029 exceeded threshold=5.0 over 773 windows
+  [  789] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8253 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  790] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7973 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  811] rack_00/ENF                              SUSPECT  score=0.919  confidence 0.9188 below normal threshold 0.93 -- monitoring
+  [  812] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7937 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  813] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8441 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  829] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8164 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  830] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8189 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  848] rack_00/ENF                              SUSPECT  score=0.870  confidence 0.8700 below normal threshold 0.93 -- monitoring
+  [  849] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7863 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  850] rack_00/ENF                              SUSPECT  score=0.897  confidence 0.8974 below normal threshold 0.93 -- monitoring
+  [  862] rack_00/ENF                              SUSPECT  score=0.870  confidence 0.8701 below normal threshold 0.93 -- monitoring
+  [  863] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7889 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  864] rack_00/ENF                              SUSPECT  score=0.897  confidence 0.8972 below normal threshold 0.93 -- monitoring
+  [  877] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8387 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  878] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8038 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  879] rack_00/ENF                              SUSPECT  score=0.922  confidence 0.9217 below normal threshold 0.93 -- monitoring
+  [  892] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8224 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  893] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8173 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  903] rack_00/ENF                              SUSPECT  score=0.920  confidence 0.9197 below normal threshold 0.93 -- monitoring
+  [  904] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8165 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  905] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8325 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  906] rack_00/ENF                              SUSPECT  score=0.927  confidence 0.9273 below normal threshold 0.93 -- monitoring
+  [  910] rack_00/ENF                              SUSPECT  score=0.910  confidence 0.9103 below normal threshold 0.93 -- monitoring
+  [  911] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8000 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  912] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8276 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  923] rack_00/ENF                              SUSPECT  score=0.928  confidence 0.9285 below normal threshold 0.93 -- monitoring
+  [  924] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8021 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  925] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8200 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid | DRIFT DETECTED: CUSUM=5.102 exceeded threshold=5.0 over 926 windows
+  [  948] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8080 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  949] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8272 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  969] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8242 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  970] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8023 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  971] rack_00/ENF                              SUSPECT  score=0.927  confidence 0.9267 below normal threshold 0.93 -- monitoring
+  [  980] rack_00/ENF                              SUSPECT  score=0.854  confidence 0.8535 below normal threshold 0.93 -- monitoring
+  [  981] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7958 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  982] rack_00/ENF                              SUSPECT  score=0.911  confidence 0.9109 below normal threshold 0.93 -- monitoring
+  [  996] rack_00/ENF                              SUSPECT  score=0.916  confidence 0.9156 below normal threshold 0.93 -- monitoring
+  [  997] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7943 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [  998] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8489 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1012] rack_00/ENF                              SUSPECT  score=0.901  confidence 0.9012 below normal threshold 0.93 -- monitoring
+  [ 1013] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7857 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1014] rack_00/ENF                              SUSPECT  score=0.868  confidence 0.8682 below normal threshold 0.93 -- monitoring
+  [ 1060] rack_00/ENF                              SUSPECT  score=0.876  confidence 0.8762 below normal threshold 0.93 -- monitoring
+  [ 1061] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7830 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1062] rack_00/ENF                              SUSPECT  score=0.895  confidence 0.8946 below normal threshold 0.93 -- monitoring
+  [ 1078] rack_00/ENF                              SUSPECT  score=0.890  confidence 0.8901 below normal threshold 0.93 -- monitoring
+  [ 1079] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7830 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1080] rack_00/ENF                              SUSPECT  score=0.880  confidence 0.8805 below normal threshold 0.93 -- monitoring
+  [ 1120] rack_00/ENF                              SUSPECT  score=0.926  confidence 0.9256 below normal threshold 0.93 -- monitoring
+  [ 1121] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8094 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1122] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8316 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1132] rack_00/ENF                              SUSPECT  score=0.883  confidence 0.8833 below normal threshold 0.93 -- monitoring
+  [ 1133] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7940 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1134] rack_00/ENF                              SUSPECT  score=0.881  confidence 0.8806 below normal threshold 0.93 -- monitoring
+  [ 1142] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8035 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1143] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8102 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1145] rack_00/ENF                              FAILED   score=0.050  DRIFT DETECTED: CUSUM=5.010 exceeded threshold=5.0 over 1146 windows
+  [ 1177] rack_00/ENF                              SUSPECT  score=0.927  confidence 0.9269 below normal threshold 0.93 -- monitoring
+  [ 1178] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8001 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1179] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8356 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1202] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8074 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1203] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8198 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1213] rack_00/ENF                              SUSPECT  score=0.915  confidence 0.9151 below normal threshold 0.93 -- monitoring
+  [ 1214] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7981 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1215] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8480 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1232] rack_00/ENF                              SUSPECT  score=0.863  confidence 0.8628 below normal threshold 0.93 -- monitoring
+  [ 1233] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7828 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1234] rack_00/ENF                              SUSPECT  score=0.897  confidence 0.8974 below normal threshold 0.93 -- monitoring
+  [ 1265] rack_00/ENF                              SUSPECT  score=0.873  confidence 0.8731 below normal threshold 0.93 -- monitoring
+  [ 1266] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7846 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1267] rack_00/ENF                              SUSPECT  score=0.895  confidence 0.8955 below normal threshold 0.93 -- monitoring
+  [ 1286] rack_00/ENF                              SUSPECT  score=0.900  confidence 0.9003 below normal threshold 0.93 -- monitoring
+  [ 1287] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7828 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1288] rack_00/ENF                              SUSPECT  score=0.864  confidence 0.8637 below normal threshold 0.93 -- monitoring
+  [ 1301] rack_00/ENF                              SUSPECT  score=0.866  confidence 0.8663 below normal threshold 0.93 -- monitoring
+  [ 1302] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7786 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1303] rack_00/ENF                              SUSPECT  score=0.894  confidence 0.8941 below normal threshold 0.93 -- monitoring
+  [ 1329] rack_00/ENF                              SUSPECT  score=0.851  confidence 0.8505 below normal threshold 0.93 -- monitoring
+  [ 1330] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8021 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1331] rack_00/ENF                              SUSPECT  score=0.910  confidence 0.9097 below normal threshold 0.93 -- monitoring
+  [ 1338] rack_00/ENF                              SUSPECT  score=0.888  confidence 0.8880 below normal threshold 0.93 -- monitoring
+  [ 1339] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7829 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1340] rack_00/ENF                              SUSPECT  score=0.869  confidence 0.8689 below normal threshold 0.93 -- monitoring
+  [ 1353] rack_00/ENF                              SUSPECT  score=0.903  confidence 0.9032 below normal threshold 0.93 -- monitoring
+  [ 1354] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7921 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1355] rack_00/ENF                              FAILED   score=0.050  DRIFT DETECTED: CUSUM=5.054 exceeded threshold=5.0 over 1356 windows
+  [ 1365] rack_00/ENF                              SUSPECT  score=0.917  confidence 0.9168 below normal threshold 0.93 -- monitoring
+  [ 1366] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7950 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1367] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8397 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1382] rack_00/ENF                              SUSPECT  score=0.871  confidence 0.8714 below normal threshold 0.93 -- monitoring
+  [ 1383] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7849 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1384] rack_00/ENF                              SUSPECT  score=0.896  confidence 0.8965 below normal threshold 0.93 -- monitoring
+  [ 1401] rack_00/ENF                              SUSPECT  score=0.882  confidence 0.8816 below normal threshold 0.93 -- monitoring
+  [ 1402] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7843 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1403] rack_00/ENF                              SUSPECT  score=0.887  confidence 0.8875 below normal threshold 0.93 -- monitoring
+  [ 1419] rack_00/ENF                              SUSPECT  score=0.856  confidence 0.8561 below normal threshold 0.93 -- monitoring
+  [ 1420] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7826 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1421] rack_00/ENF                              SUSPECT  score=0.902  confidence 0.9025 below normal threshold 0.93 -- monitoring
+  [ 1432] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8482 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1433] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7856 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1434] rack_00/ENF                              SUSPECT  score=0.897  confidence 0.8967 below normal threshold 0.93 -- monitoring
+  [ 1439] rack_00/ENF                              SUSPECT  score=0.926  confidence 0.9256 below normal threshold 0.93 -- monitoring
+  [ 1440] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8263 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1441] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8242 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1442] rack_00/ENF                              SUSPECT  score=0.928  confidence 0.9280 below normal threshold 0.93 -- monitoring
+  [ 1455] rack_00/ENF                              SUSPECT  score=0.881  confidence 0.8811 below normal threshold 0.93 -- monitoring
+  [ 1456] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7794 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1457] rack_00/ENF                              SUSPECT  score=0.875  confidence 0.8746 below normal threshold 0.93 -- monitoring
+  [ 1508] rack_00/ENF                              SUSPECT  score=0.900  confidence 0.9002 below normal threshold 0.93 -- monitoring
+  [ 1509] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7892 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1510] rack_00/ENF                              SUSPECT  score=0.863  confidence 0.8625 below normal threshold 0.93 -- monitoring
+  [ 1519] rack_00/ENF                              SUSPECT  score=0.875  confidence 0.8749 below normal threshold 0.93 -- monitoring
+  [ 1520] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7956 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1521] rack_00/ENF                              SUSPECT  score=0.888  confidence 0.8881 below normal threshold 0.93 -- monitoring
+  [ 1530] rack_00/ENF                              SUSPECT  score=0.916  confidence 0.9164 below normal threshold 0.93 -- monitoring
+  [ 1531] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8160 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid | DRIFT DETECTED: CUSUM=5.133 exceeded threshold=5.0 over 1532 windows
+  [ 1532] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8387 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1538] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8292 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1539] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7896 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1540] rack_00/ENF                              SUSPECT  score=0.912  confidence 0.9116 below normal threshold 0.93 -- monitoring
+  [ 1554] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8152 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1555] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8249 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1566] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8304 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1567] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8024 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1568] rack_00/ENF                              SUSPECT  score=0.924  confidence 0.9242 below normal threshold 0.93 -- monitoring
+  [ 1582] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8441 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1583] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7940 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1584] rack_00/ENF                              SUSPECT  score=0.918  confidence 0.9181 below normal threshold 0.93 -- monitoring
+  [ 1603] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8465 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1604] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7948 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1605] rack_00/ENF                              SUSPECT  score=0.918  confidence 0.9184 below normal threshold 0.93 -- monitoring
+  [ 1622] rack_00/ENF                              SUSPECT  score=0.919  confidence 0.9193 below normal threshold 0.93 -- monitoring
+  [ 1623] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7954 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1624] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8396 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1635] rack_00/ENF                              SUSPECT  score=0.877  confidence 0.8775 below normal threshold 0.93 -- monitoring
+  [ 1636] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7873 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1637] rack_00/ENF                              SUSPECT  score=0.890  confidence 0.8903 below normal threshold 0.93 -- monitoring
+  [ 1652] rack_00/ENF                              SUSPECT  score=0.854  confidence 0.8537 below normal threshold 0.93 -- monitoring
+  [ 1653] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7893 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1654] rack_00/ENF                              SUSPECT  score=0.909  confidence 0.9090 below normal threshold 0.93 -- monitoring
+  [ 1667] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8451 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1668] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7915 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1669] rack_00/ENF                              SUSPECT  score=0.906  confidence 0.9063 below normal threshold 0.93 -- monitoring
+  [ 1675] rack_00/ENF                              FAILED   score=0.050  DRIFT DETECTED: CUSUM=5.072 exceeded threshold=5.0 over 1676 windows
+  [ 1676] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8076 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1677] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8434 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1687] rack_00/ENF                              SUSPECT  score=0.921  confidence 0.9206 below normal threshold 0.93 -- monitoring
+  [ 1688] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8016 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1689] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8373 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1709] rack_00/ENF                              SUSPECT  score=0.882  confidence 0.8822 below normal threshold 0.93 -- monitoring
+  [ 1710] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7802 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1711] rack_00/ENF                              SUSPECT  score=0.880  confidence 0.8796 below normal threshold 0.93 -- monitoring
+  [ 1720] rack_00/ENF                              SUSPECT  score=0.867  confidence 0.8671 below normal threshold 0.93 -- monitoring
+  [ 1721] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7955 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1722] rack_00/ENF                              SUSPECT  score=0.895  confidence 0.8949 below normal threshold 0.93 -- monitoring
+  [ 1731] rack_00/ENF                              SUSPECT  score=0.913  confidence 0.9134 below normal threshold 0.93 -- monitoring
+  [ 1732] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8125 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1733] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8405 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1739] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8309 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1740] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8016 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1741] rack_00/ENF                              SUSPECT  score=0.915  confidence 0.9146 below normal threshold 0.93 -- monitoring
+  [ 1752] rack_00/ENF                              SUSPECT  score=0.880  confidence 0.8799 below normal threshold 0.93 -- monitoring
+  [ 1753] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7842 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1754] rack_00/ENF                              SUSPECT  score=0.884  confidence 0.8843 below normal threshold 0.93 -- monitoring
+  [ 1769] rack_00/ENF                              SUSPECT  score=0.926  confidence 0.9257 below normal threshold 0.93 -- monitoring
+  [ 1770] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8168 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1771] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8280 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1772] rack_00/ENF                              SUSPECT  score=0.929  confidence 0.9287 below normal threshold 0.93 -- monitoring
+  [ 1776] rack_00/ENF                              SUSPECT  score=0.917  confidence 0.9173 below normal threshold 0.93 -- monitoring
+  [ 1777] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.7931 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+  [ 1778] rack_00/ENF                              FAILED   score=0.050  DISCONTINUITY: confidence 0.8133 below hard threshold 0.85 -- ENF jumped abruptly, physically impossible on real grid
+
+======================================================================
+OVERALL SUMMARY (across all components, all windows)
+======================================================================
+  TRUSTED : 59078
+  SUSPECT : 134
+  FAILED  : 188
+
+  Components with at least one non-TRUSTED result:
+    rack_00/ENF                              trusted= 1514  suspect= 126  failed= 160
+    rack_00/x3102c0s25b0n0_cpu-0[W]          trusted= 1786  suspect=   4  failed=  10
+    rack_00/x3102c0s25b0n0_cpu-1[W]          trusted= 1797  suspect=   0  failed=   3
+    rack_00/x3102c0s5b0n0_cpu-0[W]           trusted= 1786  suspect=   4  failed=  10
+    rack_00/x3102c0s5b0n0_cpu-1[W]           trusted= 1795  suspect=   0  failed=   5
+======================================================================
+
