@@ -1,26 +1,12 @@
-# Marchisano: adversarial scenarios and attack implementation
+# Data Center Telemetry Attack Simulator
 
-## What it does
-Designs and runs replay, injection, and drift attacks against Leiva's
-verification, and measures detection. Produces `AttackEvent` records that serve
-as ground truth for `microverse_core.metrics`.
+This lane contains a pipeline tool to simulate attacks in a transmission scenario.
 
-## How to run
-Emit an `AttackEvent` per attack (class, target component, start/end window,
-opaque params). Score with `metrics.score` and `metrics.time_to_detection`. Your
-attacks must be plausible against real NLR workload baselines, not synthetic
-data, once the dataset is available.
+## What It Does
+The script reads an authentic data center telemetry log (`.jsonl` format) and introduces controlled anomalies to simulate various sensor and transmission tampering vectors. It currently offers 5 different scenarios.
 
-## Norm (important)
-You and Leiva are adversarial by design. Do not share specific attack signatures
-with Leiva until week 6. Discuss attack internals with Dr. Xiang in 1:1s, not in
-team meetings. The shared contract is only the `AttackEvent` shape, not its
-params.
+To ensure blind testing conditions for downstream digital twin detection mechanisms, the script generates two outputs (`attack_#.jsonl` and `attack_#_check.jsonl`) that hide the specific type of attack vector used. The frst file is to be used for verification and display, while the check is used for metrics.
 
-## Who to ask
-Dr. Xiang (methodology, evaluation), Lance (test harness integration).
-
-## Week-1 deliverable
-One-page attack-scenario sketch: what each of the three attacks does at the data
-level, attacker-success vs defender-success, and which NLR workload category
-each targets.
+## How to Run It
+1. Ensure your source file (e.g., `run_2node.jsonl`) is in the data/combined/ directory.
+2. Run python3 attack.py and input your scenario (0-4).
