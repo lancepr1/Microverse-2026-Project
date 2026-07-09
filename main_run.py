@@ -5,12 +5,25 @@ import importlib
 import bpy
 
 # ==========================================================================
+# 🏠 TARGET BLENDER FILE AUTO-LOADER (STEP 1 ADDITION)
+# ==========================================================================
+TARGET_BLEND_FILE = "/home/Baron/Documents/Blender Files/Data_Center_Twin3.blend"
+
+# If the runner launches a default blank project, dynamically open your file
+if bpy.data.filepath != TARGET_BLEND_FILE:
+    if os.path.exists(TARGET_BLEND_FILE):
+        print(f"🔄 Hot-loading target twin project: {TARGET_BLEND_FILE}")
+        bpy.ops.wm.open_mainfile(filepath=TARGET_BLEND_FILE)
+    else:
+        print(f"❌ Error: Could not locate your file path at: {TARGET_BLEND_FILE}")
+
+
+# ==========================================================================
 # 📂 REPOSITORY PATH ALIGNMENT
 # ==========================================================================
 REPO_ROOT = "/home/Baron/Projects/Microverse-2026-Project"
 CORE_DIR = f"{REPO_ROOT}/microverse_core"
 
-import sys
 for path in [REPO_ROOT, CORE_DIR]:
     if path not in sys.path:
         sys.path.append(path)
@@ -18,53 +31,74 @@ for path in [REPO_ROOT, CORE_DIR]:
 # Import workers directly from your local repository filesystem
 import blender_bridge
 import io_records
+from contracts import StateVariable
 
 # Force fresh reloading so updates in VS Code are pushed to Blender instantly
 importlib.reload(blender_bridge)
 importlib.reload(io_records)
 
+
 # ==========================================================================
-# 🏗️ ASSET VALIDATION LAYER
+# 📦 COMPATIBILITY WRAPPER FOR TELEMETRY LOGGING
 # ==========================================================================
-def verify_and_grab_asset(obj_name: str, fallback_type: str = "CUBE", location: tuple = (0, 0, 0)) -> bpy.types.Object:
-    if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-    if obj_name in bpy.data.objects:
-        return bpy.data.objects[obj_name]
-    if fallback_type == "ICOSPHERE":
-        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=1.0, location=location)
-    else:
-        bpy.ops.mesh.primitive_cube_add(size=1.2, location=location)
-    new_obj = bpy.context.active_object
-    new_obj.name = obj_name
-    return new_obj
+class Record:
+    def __init__(self, obj: str, prop: str, val: float, ts: float):
+        self.obj = obj
+        self.prop = prop
+        self.val = val
+        self.ts = ts
+
+    def to_dict(self):
+        """Satisfies the strict interface expected by io_records.py."""
+        return {
+            "object": self.obj,
+            "property": self.prop,
+            "value": self.val,
+            "timestamp": self.ts
+        }
 
 
 # ==========================================================================
-# ⏱️ DIRECT-DATA SIMULATION ENGINE (1 line every 2 seconds)
+# ⏱️ PRE-EXISTING SCENE LINKED SIMULATION ENGINE
 # ==========================================================================
 class RealTimeSimulationRunner:
     def __init__(self, run_id: str, source_filename: str):
         self.run_id = run_id
-        # Points directly to the data folder verified in your VS Code workspace tree
-        self.file_path = os.path.join(REPO_ROOT, "data", source_filename)
+        self.file_path = os.path.join(REPO_ROOT, "data", "combined", source_filename)
         self.step = 0
         self.file_handle = None
         
-        print(f"\n🚀 Initializing Git-Linked Telemetry Loop for Run: {run_id}")
+        print(f"\n🚀 Connecting Ingestion Engine to Pre-Existing Scene for Run: {run_id}")
         print(f"📂 Source Data Path: {self.file_path}")
         
-        # 1. Spawn the 2 CPUs (Left side)
-        verify_and_grab_asset("cpu_00", "CUBE", location=(-4.0, 0.0, 1.0))
-        verify_and_grab_asset("cpu_01", "CUBE", location=(-2.0, 0.0, 1.0))
+        # Exact nodes identified inside your cluster logging network
+        self.nodes = ["x3102c0s25b0n0", "x3102c0s5b0n0"]
         
-        # 2. Spawn the 4 GPUs (Middle)
-        for i in range(4):
-            verify_and_grab_asset(f"gpu_{i:02d}", "CUBE", location=(i * 2.0, 0.0, 1.0))
+        # Match your workspace hierarchy explicitly
+        self.grid_anchor_name = "grid_anchor.001"
+        
+        # --- VERIFY MULTI-NODE HIERARCHY MATCHING ---
+        missing_components = []
+        
+        for node in self.nodes:
+            for c in range(2):
+                cpu_id = f"{node}_cpu-{c}"
+                if cpu_id not in bpy.data.objects:
+                    missing_components.append(cpu_id)
             
-        # 3. Spawn the Grid Anchor (Right side)
-        verify_and_grab_asset("grid_anchor", "ICOSPHERE", location=(8.0, 0.0, 1.0))
-        
+            for g in range(4):
+                gpu_id = f"{node}_gpu-{g}"
+                if gpu_id not in bpy.data.objects:
+                    missing_components.append(gpu_id)
+                    
+        if self.grid_anchor_name not in bpy.data.objects:
+            missing_components.append(self.grid_anchor_name)
+            
+        if missing_components:
+            print(f"⚠️ WARNING: The following objects were not found in your scene tree: {missing_components}")
+        else:
+            print("✨ Success! All hardware components matched your workspace tree layout perfectly.")
+
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"Critical Error: Missing data file at {self.file_path}")
         self.file_handle = open(self.file_path, 'r')
@@ -76,7 +110,7 @@ class RealTimeSimulationRunner:
             
         line = self.file_handle.readline()
         if not line or not line.strip():
-            print(f"✅ Real-time run execution complete. Stream reached end of file.")
+            print(f"✅ Real-time asset stream complete. Reached end of file.")
             self.file_handle.close()
             return None
             
@@ -84,39 +118,50 @@ class RealTimeSimulationRunner:
         ts = float(data.get("index", self.step)) * 2.0
         frame_records = []
 
-        # --- 1. UPDATE CPU SYSTEM CUSTOM PROPERTIES ---
-        for i in range(2):
-            cpu_name = f"cpu_{i:02d}"
-            p_val = data.get(f"cpu-{i}[W]", 0.0)
-            c_val = data.get(f"cpu-{i}-core[W]", 0.0)
-            
-            blender_bridge.set_state(cpu_name, "power_draw_w", p_val, timestamp=ts)
-            blender_bridge.set_state(cpu_name, "core_power_w", c_val, timestamp=ts)
-            
-            frame_records.append({"object": cpu_name, "property": "power_draw_w", "value": p_val, "timestamp": ts})
-            frame_records.append({"object": cpu_name, "property": "core_power_w", "value": c_val, "timestamp": ts})
+        # --------------------------------------------------------------
+        # 🔴 DEBUGGER BREAKPOINT DIRECTION
+        # PLACE YOUR BREAKPOINT ON THE LINE BELOW!
+        # --------------------------------------------------------------
+        current_snapshot_index = data.get("index", self.step)
 
-        # --- 2. UPDATE GPU SYSTEM CUSTOM PROPERTIES ---
-        for i in range(4):
-            gpu_name = f"gpu_{i:02d}"
-            p_val = data.get(f"gpu-{i}[W]", 0.0)
-            t_val = data.get(f"gpu-{i}[C]", 0.0)
+        # Direct layout iteration across server keys
+        for node in self.nodes:
             
-            blender_bridge.set_state(gpu_name, "power_draw_w", p_val, timestamp=ts)
-            blender_bridge.set_state(gpu_name, "temp_c", t_val, timestamp=ts)
-            
-            frame_records.append({"object": gpu_name, "property": "power_draw_w", "value": p_val, "timestamp": ts})
-            frame_records.append({"object": gpu_name, "property": "temp_c", "value": t_val, "timestamp": ts})
+            # --- 1. DIRECT CPU TELEMETRY DATA ENTRY MATCHING ---
+            for cpu_idx in range(2):
+                p_val = data.get(f"{node}_cpu-{cpu_idx}[W]", 0.0)
+                c_val = data.get(f"{node}_cpu-{cpu_idx}-core[W]", 0.0)
+                
+                target_cpu_name = f"{node}_cpu-{cpu_idx}"
+                
+                blender_bridge.set_state(target_cpu_name, StateVariable(name="power_draw_w", value=p_val, unit="W", timestamp=ts, source_object=target_cpu_name))
+                blender_bridge.set_state(target_cpu_name, StateVariable(name="core_power_w", value=c_val, unit="W", timestamp=ts, source_object=target_cpu_name))
+                
+                frame_records.append(Record(obj=target_cpu_name, prop="power_draw_w", val=p_val, ts=ts))
+                frame_records.append(Record(obj=target_cpu_name, prop="core_power_w", val=c_val, ts=ts))
+
+            # --- 2. DIRECT GPU TELEMETRY DATA ENTRY MATCHING ---
+            for g_idx in range(4):
+                p_val = data.get(f"{node}_gpu-{g_idx}[W]", 0.0)
+                t_val = data.get(f"{node}_gpu-{g_idx}[C]", 0.0)
+                
+                target_gpu_name = f"{node}_gpu-{g_idx}"
+                
+                blender_bridge.set_state(target_gpu_name, StateVariable(name="power_draw_w", value=p_val, unit="W", timestamp=ts, source_object=target_gpu_name))
+                blender_bridge.set_state(target_gpu_name, StateVariable(name="temp_c", value=t_val, unit="C", timestamp=ts, source_object=target_gpu_name))
+                
+                frame_records.append(Record(obj=target_gpu_name, prop="power_draw_w", val=p_val, ts=ts))
+                frame_records.append(Record(obj=target_gpu_name, prop="temp_c", val=t_val, ts=ts))
 
         # --- 3. UPDATE REGIONAL GRID ANCHOR ---
         freq_val = data.get("FRQ", 60.0)
-        blender_bridge.set_state("grid_anchor", "grid_frequency_hz", freq_val, timestamp=ts)
-        frame_records.append({"object": "grid_anchor", "property": "grid_frequency_hz", "value": freq_val, "timestamp": ts})
-
+        blender_bridge.set_state(self.grid_anchor_name, StateVariable(name="grid_frequency_hz", value=freq_val, unit="Hz", timestamp=ts, source_object=self.grid_anchor_name)) 
+        frame_records.append(Record(obj=self.grid_anchor_name, prop="grid_frequency_hz", val=freq_val, ts=ts))
+        
         # --- 4. EXPORT SNAPSHOTS TO RUNS DIRECTORY ---
         io_records.write_records(self.run_id, "power", frame_records)
 
-        print(f"⏰ [Line Entry {data.get('index')}] Grid: {freq_val:.4f} Hz | Active tracking processing from disk updates.")
+        print(f"⏰ [Line Entry {data.get('index')}] Grid: {freq_val:.4f} Hz | Data synchronized smoothly to twin components.")
         
         # Redraw viewport layout live
         for area in bpy.context.screen.areas:
@@ -127,6 +172,6 @@ class RealTimeSimulationRunner:
         return 2.0
 
 
-# Initialize runner using the direct repository file mapping tracking architecture
-sim_runner = RealTimeSimulationRunner(run_id="frl_lean_direct_run", source_filename="run01.jsonl")
+# Initialize layout link using your pre-existing environment file structure
+sim_runner = RealTimeSimulationRunner(run_id="frl_lean_direct_run", source_filename="run_2node.jsonl")
 bpy.app.timers.register(sim_runner.process_next_line)
