@@ -34,27 +34,41 @@ STATUS OF EACH STAGE (2026-07):
                                    digital-twin integration once their
                                    expected interface is confirmed.
 
-CLI (run from anywhere, though the repo root is the convention used
-everywhere else in this project):
-    python scripts/run_microverse.py \\
-        --workload-type {inference,training} \\
-        --enf-path /path/to/ENF.csv \\
-        --nlr-folder /path/to/nlr/data/ \\
-        --slurm-id ID          # required for training, ignored for inference
-        [--node-count N]       # first N nodes found, sorted alphabetically
-        [--node-ids ID1 ID2 ...]   # exact nodes instead of --node-count
-        [--component-id rack_00]
-        [--output-dir data/combined]
+USAGE (2026-07 redesign -- fully interactive, no CLI flags to remember):
+    python scripts/run_microverse.py
+
+You'll be walked through, in order:
+    1. Path to your raw datasets root folder (e.g. .../00_raw_datasets/)
+    2. Which dataset to ingest -- listed from whatever folders are
+       actually present there (training_*, inference_*)
+    3. How many nodes -- listed from whatever node-count folders exist
+       under the chosen dataset. This is NOT a fixed list -- different
+       datasets genuinely have different options (confirmed:
+       training_llama2_70b_lora only has 2/4/8/16node;
+       training_stable_diffusion has 1/2/4/8/16node too). Always
+       discovered from the real folders present, never hardcoded.
+    4. If (and only if) a training dataset was chosen: which SLURM job
+       ID -- discovered by scanning the selected node folder's actual
+       filenames for the "..._slurmid_XXXXX_..." pattern, since one
+       node folder can contain multiple separate training runs.
+       Inference datasets skip this entirely -- they don't use one.
+    5. Path to the ENF CSV file
+    6. Component ID (defaults to rack_00)
+
+Then runs the full pipeline. When it reaches attack.py, that script's
+OWN interactive prompts take over the terminal directly -- this
+script doesn't try to pass it arguments, just launches it and lets
+you answer its prompts as normal.
 
 Workload type matters beyond just labeling the run -- it changes HOW
 NLR data is discovered. Training runs use a SLURM job ID to find the
 right log files; inference runs use old-style logs with no SLURM ID
-at all (discover_nlr_pairs(folder, slurm_id=None)). Get this wrong
-and node discovery silently returns nothing or the wrong files.
+at all (discover_nlr_pairs(folder, slurm_id=None)).
 """
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -76,48 +90,168 @@ from microverse_core.data_loaders import (
 )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Microverse-2026-Project: full ingestion-to-verification pipeline"
-    )
-    parser.add_argument(
-        "--workload-type", choices=["inference", "training"], required=True,
-        help="Determines how NLR data is discovered -- training runs use a "
-             "SLURM job ID, inference runs don't."
-    )
-    parser.add_argument(
-        "--node-count", type=int, default=None,
-        help="Use the first N discovered nodes (sorted alphabetically). "
-             "Omit to use every node found."
-    )
-    parser.add_argument(
-        "--node-ids", nargs="+", default=None,
-        help="Use these exact node IDs instead of --node-count. Overrides "
-             "--node-count if both are given."
-    )
-    parser.add_argument("--enf-path", required=True, help="Path to the raw ENF CSV file")
-    parser.add_argument("--nlr-folder", required=True, help="Path to the folder containing NLR (GPU/CPU) log files")
-    parser.add_argument(
-        "--slurm-id", default=None,
-        help="Required when --workload-type training. Ignored for inference."
-    )
-    parser.add_argument("--component-id", default="rack_00")
-    parser.add_argument(
-        "--output-dir", default="data/combined",
-        help="Where to write intermediate and final pipeline files"
-    )
-    args = parser.parse_args()
+def prompt_choice(prompt_text: str, options: list) -> str:
+    """Prints a numbered list, prompts until a valid choice is made."""
+    print(f"\n{prompt_text}")
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}. {opt}")
+    while True:
+        raw = input(f"Enter a number [1-{len(options)}]: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        print("  Invalid choice, try again.")
 
-    if args.workload_type == "training" and not args.slurm_id:
-        parser.error("--slurm-id is required when --workload-type training")
 
-    # Anchor to repo root explicitly if given as a relative path -- makes
-    # this robust to being invoked from anywhere, not just the repo root
-    # (matters more now that this script itself lives one level deeper,
-    # in scripts/, than the rest of the project's convention assumes).
-    output_dir = Path(args.output_dir)
-    args.output_dir = str(output_dir if output_dir.is_absolute() else _REPO_ROOT / output_dir)
+def prompt_path(prompt_text: str, default: str = None) -> Path:
+    """Prompts for a filesystem path, re-asking until it actually exists."""
+    suffix = f" [{default}]" if default else ""
+    while True:
+        raw = input(f"{prompt_text}{suffix}: ").strip()
+        if not raw and default:
+            raw = default
+        path = Path(raw).expanduser()
+        if path.exists():
+            return path
+        print(f"  Path not found: {path} -- try again.")
 
+
+def _node_sort_key(folder_name: str) -> int:
+    """Sorts '1node'/'2node'/'4node'/... numerically, not alphabetically
+    (alphabetical would put '16node' before '2node')."""
+    digits = re.sub(r"\D", "", folder_name)
+    return int(digits) if digits else 0
+
+
+def discover_slurm_ids(node_folder: Path) -> list:
+    """
+    Scans filenames in node_folder for the 'slurmid_XXXXX_' pattern
+    (matches the naming convention used throughout this project, e.g.
+    nvml_wattameter_emissions_parsed_slurmid_10742842_node_...) and
+    returns the distinct IDs actually present, sorted. A training
+    dataset's node folder can contain multiple separate runs (multiple
+    SLURM jobs), which is why this is a selection, not a single fixed
+    value.
+    """
+    pattern = re.compile(r"slurmid_(\d+)_")
+    ids = set()
+    for f in node_folder.iterdir():
+        m = pattern.search(f.name)
+        if m:
+            ids.add(m.group(1))
+    return sorted(ids)
+
+
+def discover_enf_devices(enf_folder: Path) -> dict:
+    """
+    Scans enf_folder for files matching 'DevN_ENF_HrNN.csv' and returns
+    {device_label: {hour_label: filepath}}, e.g.
+        {"Dev1": {"Hr01": Path(...), "Hr02": Path(...), ...}, "Dev2": {...}}
+    Devices and hours are whatever's actually present -- not assumed
+    to be Dev1-3 or any fixed hour range.
+    """
+    pattern = re.compile(r"^(Dev\d+)_ENF_(Hr\d+)\.csv$", re.IGNORECASE)
+    devices: dict = {}
+    for f in enf_folder.iterdir():
+        m = pattern.match(f.name)
+        if m:
+            dev, hr = m.group(1), m.group(2)
+            devices.setdefault(dev, {})[hr] = f
+    return devices
+
+
+def gather_inputs():
+    """
+    Interactive replacement for CLI flags -- walks the user through:
+    which dataset, how many nodes (options differ per dataset -- e.g.
+    training_llama2_70b_lora only has 2/4/8/16node, while
+    training_stable_diffusion has 1/2/4/8/16node -- discovered from
+    the real folders present, never hardcoded), and for training
+    datasets specifically, which SLURM job ID (inference datasets
+    don't use one at all).
+    """
+    print("=" * 70)
+    print("Microverse-2026-Project -- Data Ingestion")
+    print("=" * 70)
+
+    datasets_root = prompt_path("Path to your raw datasets folder")
+    dataset_options = sorted(p.name for p in datasets_root.iterdir() if p.is_dir())
+    if not dataset_options:
+        raise RuntimeError(f"No dataset folders found in {datasets_root}")
+
+    dataset_name = prompt_choice("Which dataset do you want to ingest?", dataset_options)
+    dataset_path = datasets_root / dataset_name
+    workload_type = "training" if "training" in dataset_name.lower() else "inference"
+    print(f"  -> workload_type = {workload_type}")
+
+    node_options = sorted(
+        (p.name for p in dataset_path.iterdir() if p.is_dir()),
+        key=_node_sort_key,
+    )
+    if not node_options:
+        raise RuntimeError(f"No node-count folders found in {dataset_path}")
+
+    node_folder_name = prompt_choice(
+        f"How many nodes? (options found under {dataset_name})", node_options
+    )
+    node_folder = dataset_path / node_folder_name
+
+    slurm_id = None
+    if workload_type == "training":
+        slurm_ids = discover_slurm_ids(node_folder)
+        if not slurm_ids:
+            raise RuntimeError(
+                f"No SLURM job IDs found in {node_folder} -- expected filenames "
+                f"matching '..._slurmid_XXXXX_...'"
+            )
+        slurm_id = prompt_choice(
+            f"Which SLURM job ID? (found in {node_folder_name})", slurm_ids
+        )
+    else:
+        print("  (no SLURM ID needed -- inference datasets don't use one)")
+
+    enf_folder = prompt_path("\nPath to your ENF data folder")
+    devices = discover_enf_devices(enf_folder)
+    if not devices:
+        raise RuntimeError(
+            f"No files matching 'DevN_ENF_HrNN.csv' found in {enf_folder}"
+        )
+
+    device_options = sorted(devices.keys(), key=_node_sort_key)
+    device = prompt_choice("Which recording device?", device_options)
+
+    hour_options = sorted(devices[device].keys(), key=_node_sort_key)
+    hour = prompt_choice(f"Which hour? (found for {device})", hour_options)
+    enf_path = devices[device][hour]
+    print(f"  -> using {enf_path.name}")
+
+    # component_id is just a LABEL for which simulated rack this run
+    # represents -- it's not read from the ENF file or the NLR data,
+    # and doesn't need to relate to which Dev/hour was picked above.
+    # Every verification result gets prefixed with it (e.g.
+    # "rack_00/ENF", "rack_00/x3102c0s25b0n0_cpu-0[W]") so results from
+    # different racks can be told apart if this project ever verifies
+    # more than one at once. Almost always just the default.
+    print(
+        "\nComponent ID -- a label for which simulated rack this run "
+        "represents (not related to the ENF device/hour you just picked). "
+        "Every result gets prefixed with it, e.g. 'rack_00/ENF'. "
+        "Leave blank for the default unless you're specifically "
+        "simulating more than one rack."
+    )
+    component_id = input("Component ID [rack_00]: ").strip() or "rack_00"
+
+    args = argparse.Namespace(
+        workload_type=workload_type,
+        nlr_folder=str(node_folder),
+        node_folder_name=node_folder_name,
+        slurm_id=slurm_id,
+        enf_path=str(enf_path),
+        component_id=component_id,
+        node_count=None,  # already resolved by folder selection -- discover_nlr_pairs
+        node_ids=None,    # will naturally find exactly what's in node_folder
+        output_dir=str(_REPO_ROOT / "data" / "combined"),
+    )
+    print()
     return args
 
 
@@ -159,24 +293,27 @@ def stage_1_ingest_and_smooth(args) -> Path:
     node_windows = load_nlr_multi(pairs)
     records = build_combined_records(enf, node_windows)
 
-    # NOTE: attack.py currently expects a file literally named
-    # "2node.jsonl" in this folder (confirmed 2026-07, not a dynamic
-    # convention as far as we know) -- meaning as of right now this
-    # pipeline only actually works end-to-end for 2-node runs,
-    # regardless of what --node-count is set to. If you run with a
-    # different node count, stage 1 will still succeed, but attack.py
-    # will silently read the WRONG (or a stale/missing) file unless
-    # this naming assumption is confirmed to scale, or attack.py is
-    # updated to accept a real --input argument like everything else
-    # in this project.
-    out_path = Path(args.output_dir) / "2node.jsonl"
+    # Named after the actual node folder the user selected (e.g.
+    # "4node.jsonl", "1node.jsonl") -- traceable to the real choice
+    # made in gather_inputs(), rather than a hardcoded guess.
+    #
+    # NOTE: attack.py is currently only confirmed to read a file
+    # literally named "2node.jsonl" (as of 2026-07, still being
+    # actively developed on Ethan's side -- eventually it'll take
+    # whatever file is present in data/combined instead of a fixed
+    # name). If a NON-2node dataset was selected, this file's name
+    # won't match what attack.py currently looks for -- the warning
+    # below fires in that case so it's visible, not silent.
+    out_filename = getattr(args, "node_folder_name", None) or "2node"
+    out_path = Path(args.output_dir) / f"{out_filename}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_combined_jsonl(records, str(out_path))
     print(f"[1/4] Wrote {len(records)} records -> {out_path}")
-    if len(pairs) != 2:
-        print(f"[1/4] WARNING: ingested {len(pairs)} nodes, but attack.py "
-              f"currently expects a fixed '2node.jsonl' filename regardless "
-              f"of node count -- confirm this actually works for non-2-node runs.")
+    if out_filename != "2node":
+        print(f"[1/4] WARNING: wrote '{out_filename}.jsonl', but attack.py is "
+              f"currently only confirmed to read a fixed 'data/combined/2node.jsonl' "
+              f"regardless of what was actually selected -- this run's file "
+              f"may not be found by attack.py until that's generalized on its side.")
     return out_path
 
 
@@ -217,7 +354,8 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     before = set(output_dir.glob("attack_*.jsonl"))
 
-    print(f"[2/4] Running attack.py (reads {clean_path} implicitly, no args passed) ...")
+    print(f"[2/4] Launching attack.py (reads {clean_path} implicitly, no args passed) ...")
+    print(f"[2/4] attack.py has its own interactive prompts -- answer those directly below.\n")
     subprocess.run(
         ["python", "lanes/marchisano_attacks/attack.py"],
         check=True,
@@ -314,7 +452,7 @@ def stage_4_fork_outputs(verified_path: Path, args) -> None:
 
 
 def main():
-    args = parse_args()
+    args = gather_inputs()
     clean_path = stage_1_ingest_and_smooth(args)
     attacked_path = stage_2_inject_attacks(clean_path, args)
     verified_path = stage_3_verify_and_annotate(attacked_path, args)
