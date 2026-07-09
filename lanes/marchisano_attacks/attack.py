@@ -3,12 +3,13 @@ import os
 import json
 import sys
 import random
+import argparse
 
 # =====================================================================
 # PATH CONFIGURATION
 # =====================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_FILE = os.path.normpath(os.path.join(SCRIPT_DIR, "../../data/combined/run_2node.jsonl"))
+DATA_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "../../data/combined"))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 
 # =====================================================================
@@ -276,12 +277,25 @@ def apply_drift_attack(data, start, end, targets, params, condition_type=None, c
 # MAIN RUNNER EXECUTION
 # =====================================================================
 def main():
-    if not os.path.exists(INPUT_FILE):
-        print(f"Error: Input file '{INPUT_FILE}' not found.")
+    # Setup command line argument parser
+    parser = argparse.ArgumentParser(description="Inject anomaly scenarios into dynamic telemetry datasets.")
+    parser.add_argument(
+        "--nodes", 
+        type=int, 
+        default=2, 
+        help="Specify target topology cluster size to parse from data/combined directory (e.g., 2 or 16)"
+    )
+    args = parser.parse_args()
+
+    # Construct file path using dynamically provided nodes count
+    input_file = os.path.join(DATA_DIR, f"run_{args.nodes}node.jsonl")
+
+    if not os.path.exists(input_file):
+        print(f"Error: Input file '{input_file}' not found.")
         sys.exit(1)
 
-    print(f"Reading input data from '{INPUT_FILE}'...")
-    with open(INPUT_FILE, "r") as f:
+    print(f"Reading input data from '{input_file}'...")
+    with open(input_file, "r") as f:
         data = [json.loads(line) for line in f]
 
     total_rows = len(data)
@@ -399,7 +413,7 @@ def main():
 
     # -----------------------------------------------------------------
     # EXECUTION OF MATH ENGINE PIPELINE
-    # -----------------------------------------------------------------
+    # --------------------------------=================================
     start_idx = int(total_rows * start_pct)
     end_idx = int(total_rows * end_pct)
     targets = schema.get(target_group, schema["all"])
@@ -410,7 +424,6 @@ def main():
     if attack_type == "none":
         modified_data, attack_labels = apply_no_change(data)
     elif attack_type == "replay":
-        # Replay updated to enforce column targets, preventing wattage loops from bleeding onto thermals
         modified_data, attack_labels = apply_replay_attack(data, start_idx, end_idx, total_rows, run_params, c_type, c_val, targets=targets)
     elif attack_type == "injection":
         modified_data, attack_labels = apply_injection_attack(data, start_idx, end_idx, targets, run_params, c_type, c_val)
@@ -427,7 +440,6 @@ def main():
     print(f"\nWriting files to: '{OUTPUT_DIR}'...")
     with open(output_main, "w") as f_main, open(output_check, "w") as f_check:
         for row, is_attack in zip(modified_data, attack_labels):
-            # Dynamic precision inline conditional rule:
             formatted_row = {
                 k: (round(v, 1) if "uJ" in k else round(v, 4)) if isinstance(v, float) else v 
                 for k, v in row.items()
