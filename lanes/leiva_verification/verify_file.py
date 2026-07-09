@@ -45,7 +45,21 @@ def main():
         "--show-all", action="store_true",
         help="Print every component's result every window, not just non-TRUSTED ones"
     )
+    parser.add_argument(
+        "--output",
+        help="Write the complete SUSPECT/FAILED report (plus summary) to this file, "
+             "in addition to printing to console. No truncation -- every flagged "
+             "line included, useful for reviewing everything before importing "
+             "downstream (e.g. into Blender)."
+    )
     args = parser.parse_args()
+
+    out_lines = []
+
+    def emit(text=""):
+        print(text)
+        if args.output:
+            out_lines.append(text)
 
     print(f"Loading records from {args.input} ...")
     records = list(read_combined_jsonl(args.input))
@@ -61,7 +75,18 @@ def main():
 
     for record in records:
         record = dict(record)
-        record["timestamp"] = float(record["index"])
+        # FIXED (2026-07): was record["timestamp"] = float(record["index"]),
+        # which passes the raw record index directly as if it were already
+        # in seconds. AnchorExtractor expects real elapsed seconds (its own
+        # docstring: "t=2.0 -> index 1" at 0.5 Hz) -- passing raw index
+        # silently caused int(timestamp * sample_rate_hz) to under-advance,
+        # visiting each real window twice and never reaching roughly the
+        # back half of the file as a window center at all. Confirmed via
+        # a direct precision/recall test against ground-truth attack
+        # labels: this bug does NOT affect ENFNominalRangeCheck (operates
+        # on raw FRQ directly, no windowing), but DOES affect every
+        # confidence-based check (continuity, drift).
+        record["timestamp"] = float(record["index"]) / 0.5
         anchor = extractor.extract(record["timestamp"])
 
         # verify() now returns a LIST -- one merged ENF result plus one
@@ -73,31 +98,35 @@ def main():
             total_counts[result.status] += 1
 
             if args.show_all or result.status != "trusted":
-                print(f"  [{record['index']:5d}] {result.component_id:40s} "
-                      f"{result.status.upper():8s} score={result.score:.3f}  {result.reason}")
+                emit(f"  [{record['index']:5d}] {result.component_id:40s} "
+                     f"{result.status.upper():8s} score={result.score:.3f}  {result.reason}")
 
     # ----------------------------------------------------------------
     # Summary
     # ----------------------------------------------------------------
-    print(f"\n{'='*70}")
-    print("OVERALL SUMMARY (across all components, all windows)")
-    print(f"{'='*70}")
-    print(f"  TRUSTED : {total_counts['trusted']}")
-    print(f"  SUSPECT : {total_counts['suspect']}")
-    print(f"  FAILED  : {total_counts['failed']}")
+    emit(f"\n{'='*70}")
+    emit("OVERALL SUMMARY (across all components, all windows)")
+    emit(f"{'='*70}")
+    emit(f"  TRUSTED : {total_counts['trusted']}")
+    emit(f"  SUSPECT : {total_counts['suspect']}")
+    emit(f"  FAILED  : {total_counts['failed']}")
 
     flagged = {
         cid: counts for cid, counts in component_counts.items()
         if counts["failed"] or counts["suspect"]
     }
     if flagged:
-        print(f"\n  Components with at least one non-TRUSTED result:")
+        emit(f"\n  Components with at least one non-TRUSTED result:")
         for cid, counts in sorted(flagged.items()):
-            print(f"    {cid:40s} trusted={counts['trusted']:5d}  "
-                  f"suspect={counts['suspect']:4d}  failed={counts['failed']:4d}")
+            emit(f"    {cid:40s} trusted={counts['trusted']:5d}  "
+                 f"suspect={counts['suspect']:4d}  failed={counts['failed']:4d}")
     else:
-        print("\n  Every component was TRUSTED for the entire file.")
-    print(f"{'='*70}\n")
+        emit("\n  Every component was TRUSTED for the entire file.")
+    emit(f"{'='*70}\n")
+
+    if args.output:
+        Path(args.output).write_text("\n".join(out_lines) + "\n")
+        print(f"Full flagged report written to {args.output}")
 
 
 if __name__ == "__main__":

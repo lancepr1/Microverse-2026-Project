@@ -79,6 +79,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from microverse_core.data_loaders import (
     load_enf,
+    combined_smooth,
     discover_nlr_pairs,
     load_nlr_multi,
     build_combined_records,
@@ -111,24 +112,59 @@ SLURM_ID = "10742795"
 # NLR_FOLDER = "/path/to/your/nlr_data/inference_llama2_70b_lora/16node_run1/"
 # SLURM_ID = None
 
-# Output stays repo-relative regardless of where your raw data lives --
-# anchored to this file's own location, not your current directory.
+# NODE_COUNT / NODE_IDS -- optional. Both default to None, meaning
+# "ingest every node discover_nlr_pairs finds" (today's behavior,
+# unchanged). Set ONE of these to ingest only a subset -- useful for
+# comparing verifier behavior at different real node counts without
+# touching raw data or needing a separate script:
+#   NODE_COUNT = 2        -> first 2 nodes found, sorted alphabetically
+#   NODE_IDS = ["x3105c0s37b0n0", "x3105c0s41b0n0"]  -> these exact nodes
+NODE_COUNT = None
+NODE_IDS = None
+
+# Output filename reflects how many nodes were actually ingested, so
+# a subset run never silently overwrites your full-rack baseline file.
 OUT_PATH = REPO_ROOT / "data" / "combined" / "run_2node.jsonl"
 
 # ---------------------------------------------------------------------------
 
 
 def main():
-    # ---- Step 1: load ENF ----
+    # ---- Step 1: load ENF, then smooth it -- BEFORE this file goes ----
+    # ---- anywhere near attack injection. Must stay in this exact  ----
+    # ---- position: combined_smooth() should never run on a file   ----
+    # ---- that's already been through attack injection (verified   ----
+    # ---- 2026-07 with the earlier clean_enf() -- doing so silently----
+    # ---- erases spike-type attacks with zero detection; the same  ----
+    # ---- rule applies here). verify_file.py never imports         ----
+    # ---- combined_smooth at all, so this is the only place it     ----
+    # ---- should ever be called.                                   ----
     print(f"Loading ENF from {ENF_PATH} ...")
     enf = load_enf(ENF_PATH)
     print(f"  -> {len(enf)} ENF readings")
 
-    # ---- Step 2: discover and load all 16 node pairs ----
+    print("Smoothing ENF (Hampel outlier correction + Butterworth lowpass) ...")
+    enf = combined_smooth(enf)
+    print(f"  -> done")
+
+    # ---- Step 2: discover node pairs, optionally narrow to a subset ----
     print(f"\nDiscovering NLR pairs in {NLR_FOLDER}")
     print(f"  filtering by slurm_id={SLURM_ID} ...")
     pairs = discover_nlr_pairs(NLR_FOLDER, slurm_id=SLURM_ID)
     print(f"  -> {len(pairs)} node pair(s) found")
+
+    out_path = OUT_PATH
+    if NODE_IDS:
+        pairs = [p for p in pairs if p[0] in NODE_IDS]
+        missing = set(NODE_IDS) - {p[0] for p in pairs}
+        if missing:
+            raise ValueError(f"Requested node(s) not found: {sorted(missing)}")
+        print(f"  -> narrowed to {len(pairs)} requested node(s): {[p[0] for p in pairs]}")
+        out_path = REPO_ROOT / "data" / "combined" / f"run_{len(pairs)}node.jsonl"
+    elif NODE_COUNT:
+        pairs = sorted(pairs, key=lambda p: p[0])[:NODE_COUNT]
+        print(f"  -> narrowed to first {len(pairs)} node(s): {[p[0] for p in pairs]}")
+        out_path = REPO_ROOT / "data" / "combined" / f"run_{len(pairs)}node.jsonl"
 
     print("\nLoading and aggregating NLR data ...")
     node_windows = load_nlr_multi(pairs)
@@ -142,13 +178,13 @@ def main():
           f"{list(records[0].keys())[-2:]}")
 
     # ---- Step 4: write to JSONL ----
-    print(f"\nWriting to {OUT_PATH} ...")
-    write_combined_jsonl(records, OUT_PATH)
+    print(f"\nWriting to {out_path} ...")
+    write_combined_jsonl(records, out_path)
     print(f"  -> done")
 
     # ---- Step 5: read back and print ----
-    print(f"\nReading back from {OUT_PATH} and printing to console ...\n")
-    for record in read_combined_jsonl(OUT_PATH):
+    print(f"\nReading back from {out_path} and printing to console ...\n")
+    for record in read_combined_jsonl(out_path):
         print(record)
 
 
