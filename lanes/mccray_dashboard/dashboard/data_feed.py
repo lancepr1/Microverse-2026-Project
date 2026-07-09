@@ -38,7 +38,7 @@ _t0 = [0.0]
 _ready = [False]
 _rack_id = [None]
 
-_NODE_HOSTNAME_RE = re.compile(r"^x\d+c\d+s\d+b\d+n\d+$")
+_NODE_HOSTNAME_RE = re.compile(r"^node\d{2}$")
 
 
 def init_feed(run_file="run01.jsonl"):
@@ -113,12 +113,12 @@ _multi_max_len = [0]
 
 
 def list_node_ids() -> list[str]:
-    """Every node hostname with a recording in DATA_DIR, sorted. This is the
-    Rack 1-4 grouping source for the Operator tab: chunking this sorted list
-    into groups of 4 gives Rack 1..4 (there is no rack field in the
-    recordings themselves -- see data/README.md). run01.jsonl (the original
-    single-node demo recording, not one of the 16 real node hostnames) is
-    excluded by the hostname pattern match."""
+    """Every node id ("node00".."node15") with a recording in DATA_DIR,
+    sorted. This is the Rack 1-4 grouping source for the Operator tab:
+    chunking this sorted list into groups of 4 gives Rack 1..4 (there is
+    no rack field in the recordings themselves -- see data/README.md).
+    run01.jsonl (the original single-node demo recording, not one of the
+    16 real nodes) is excluded by the node-id pattern match."""
     paths = glob.glob(os.path.join(DATA_DIR, "*.jsonl"))
     ids = [
         os.path.splitext(os.path.basename(path))[0]
@@ -126,6 +126,13 @@ def list_node_ids() -> list[str]:
         if _NODE_HOSTNAME_RE.match(os.path.splitext(os.path.basename(path))[0])
     ]
     return sorted(ids)
+
+
+def node_display_label(node_id: str) -> str:
+    """Human-friendly "Node 00".."Node 15" label for a node id. Node ids
+    are already "node00".."node15" (the .jsonl filename stem -- see
+    data/README.md), so this just reformats the existing number."""
+    return f"Node {node_id.removeprefix('node')}"
 
 
 def init_multi_feed() -> None:

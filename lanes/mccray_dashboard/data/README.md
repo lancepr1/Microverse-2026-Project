@@ -37,10 +37,13 @@ produce empty `gpu_power_w`/`cpu_power_w` dicts for every sample.
 `tools/split_16node.py` regroups `run_16node.jsonl` by hostname: for each
 line, it splits the 16 column blocks apart by their `<hostname>_` prefix,
 strips the prefix, and re-attaches the shared `index`/`FRQ` to each node's
-record. The result is one `<hostname>.jsonl` file per node, in the same
-`index`/`FRQ`/`gpu-N[...]`/`cpu-N[...]` shape as `run01.jsonl`, so
-`data_feed.py`'s existing single-node loader (via `TelemetrySample`) reads
-any of them unchanged -- no parser changes needed.
+record. The result is one `node00.jsonl`..`node15.jsonl` file per node
+(numbered by sorting the source hostnames alphabetically, so numbering is
+stable across regeneration), in the same `index`/`FRQ`/`gpu-N[...]`/
+`cpu-N[...]` shape as `run01.jsonl`, so `data_feed.py`'s existing
+single-node loader (via `TelemetrySample`) reads any of them unchanged --
+no parser changes needed. The original hostname per node is only printed
+to the terminal when regenerating, not stored in the output files.
 
 Regenerate with:
 
@@ -55,7 +58,8 @@ into this directory; pass `--input`/`--output-dir` to override.
 
 - `run01.jsonl` -- original single-node recording used by the dashboard's
   first version.
-- `<hostname>.jsonl` (16 files) -- one per node from `run_16node.jsonl`,
-  produced by `split_16node.py` as described above. `data_feed.py` derives
-  a run's id from the filename stem (see `get_rack_id()`), so loading e.g.
-  `x3105c0s37b0n0.jsonl` gives that node the rack id `x3105c0s37b0n0`.
+- `node00.jsonl`..`node15.jsonl` (16 files) -- one per node from
+  `run_16node.jsonl`, produced by `split_16node.py` as described above.
+  `data_feed.py` derives a node's id from the filename stem (see
+  `get_rack_id()`), so loading e.g. `node07.jsonl` gives that node the id
+  `node07`, displayed in the dashboard as "Node 07".
