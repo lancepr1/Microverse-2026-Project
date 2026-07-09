@@ -117,6 +117,23 @@ CUSUM_HISTORY    = 60
 LOCAL_CUSUM_WINDOW_SIZE = 10
 LOCAL_CUSUM_THRESHOLD   = 2.0
 
+# Raw-value drift check -- added 2026-07 to close a validated gap: a
+# slow, smooth ramp attack (each step tiny, cumulative drift large)
+# doesn't disrupt window-to-window CONFIDENCE early on, so every
+# confidence-based check above (DISCONTINUITY, LOCAL ANOMALY, DRIFT
+# DETECTED -- which despite its name tracks confidence drift, not
+# value drift) stayed blind until the cumulative drift crossed the
+# fixed NOMINAL_TOLERANCE_HZ absolute threshold. Tested against a real
+# 90-window ground-truth ramp attack: existing checks alone caught
+# 49/90 (54%); this check alone caught 71/90 (79%), fully overlapping
+# and extending the existing coverage. Residual gap (first ~19 windows
+# of the ramp) is expected detection latency -- any window-based trend
+# check needs some minimum history to distinguish a real ramp from
+# noise. Calibrated against real cleaned data: threshold=0.6 gives
+# 0.33% FPR alone, 0.78% combined with everything else.
+RAW_DRIFT_WINDOW_SIZE = 30
+RAW_DRIFT_THRESHOLD = 0.6
+
 # ---------------------------------------------------------------------------
 # Tunable thresholds -- NLR side
 # TODO: run nlr_profile.py across all five workload modes and update.
@@ -369,9 +386,29 @@ class _LocalCUSUMDetector:
     testing, where single-window thresholding degraded badly on longer
     (but still well under a minute) sustained anomalies.
 
-    Resets automatically once confidence returns to normal for a
-    stretch, so it re-arms for the next potential anomaly rather than
-    staying latched the way a naive running total would.
+    RECOVERY MECHANISM (added 2026-07, second pass): tested against a
+    real ground-truth attack (10 genuine windows) and found the slow
+    linear decay alone left this detector firing FAILED for roughly
+    120 additional windows (~4 minutes) after DISCONTINUITY had already
+    cleared and the underlying confidence had genuinely recovered --
+    the cusum simply climbed too high during the attack to decay back
+    under threshold quickly at the baseline-sized decay step. Fixed by
+    tracking consecutive windows with confidence back above
+    recovery_threshold; after recovery_windows in a row, force a full
+    reset instead of waiting on the slow linear decay.
+
+    recovery_windows=20 (not the originally-tried 5) was chosen after
+    finding a real tradeoff: a SHORT recovery_windows can trigger a
+    premature reset if a longer attack has a brief internal "quiet
+    patch" where confidence genuinely recovers for a few windows before
+    the attack continues (measured directly: a 22-sample splice attack
+    has exactly this shape, confidence hitting 0.97+ for 5 straight
+    windows midway through, well before the attack actually ends) --
+    at recovery_windows=5 this cut splice recall from 22/22 to 8/22.
+    recovery_windows=20 was swept and confirmed to fully restore that
+    recall while still keeping the real-attack recovery tail far
+    shorter than no fast-recovery at all (measured: ~28 windows vs the
+    original ~120).
     """
 
     def __init__(
@@ -379,12 +416,17 @@ class _LocalCUSUMDetector:
         window_size: int = LOCAL_CUSUM_WINDOW_SIZE,
         baseline: float = CUSUM_BASELINE,
         cusum_threshold: float = LOCAL_CUSUM_THRESHOLD,
+        recovery_threshold: float = CONFIDENCE_SUSPECT,
+        recovery_windows: int = 20,
     ):
         self._window_size = window_size
         self._baseline = baseline
         self._cusum_threshold = cusum_threshold
+        self._recovery_threshold = recovery_threshold
+        self._recovery_windows = recovery_windows
         self._history: collections.deque = collections.deque(maxlen=window_size)
         self._cusum: float = 0.0
+        self._consecutive_good: int = 0
 
     @property
     def cusum(self) -> float:
@@ -397,15 +439,25 @@ class _LocalCUSUMDetector:
         self._cusum = max(0.0, self._cusum + (deviation - self._baseline))
         if len(self._history) == self._window_size and deviation < self._baseline:
             self._cusum = max(0.0, self._cusum - self._baseline)
+
+        if confidence >= self._recovery_threshold:
+            self._consecutive_good += 1
+            if self._consecutive_good >= self._recovery_windows:
+                self._cusum = 0.0
+        else:
+            self._consecutive_good = 0
+
         return self._cusum > self._cusum_threshold
 
     def calibrate(self, baseline: float) -> None:
         """Allows the same runtime-calibrated baseline _DriftMonitor uses to be shared here."""
         self._baseline = baseline
         self._cusum = 0.0
+        self._consecutive_good = 0
 
     def reset(self) -> None:
         self._cusum = 0.0
+        self._consecutive_good = 0
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +471,53 @@ class _LocalCUSUMDetector:
 
 _TRUSTED = VerificationStatus.TRUSTED.value
 _FAILED  = VerificationStatus.FAILED.value
+
+
+class _RawDriftCheck:
+    """
+    Detects sustained directional drift in the RAW ENF value, completely
+    independent of confidence -- see module comment above
+    RAW_DRIFT_WINDOW_SIZE for the gap this closes and why it's needed.
+
+    Splits a rolling window of raw values into two halves and compares
+    their means. A real random walk around a stable nominal frequency
+    should show a roughly-zero difference between an early and late
+    half of any given window; a sustained directional ramp (the attack
+    type this targets) produces a clear, growing difference instead.
+
+    Deliberately simple (not a proper linear regression) -- tested
+    directly against real clean data and a real ground-truth ramp
+    attack, and a full regression fit wasn't needed to get a working,
+    well-calibrated result.
+    """
+
+    def __init__(
+        self,
+        window_size: int = RAW_DRIFT_WINDOW_SIZE,
+        drift_threshold: float = RAW_DRIFT_THRESHOLD,
+    ):
+        self._window_size = window_size
+        self._drift_threshold = drift_threshold
+        self._history: collections.deque = collections.deque(maxlen=window_size)
+
+    def check(self, raw_freq: float) -> tuple[bool, str]:
+        self._history.append(raw_freq)
+        if len(self._history) < self._window_size:
+            return True, "ok"
+        half = self._window_size // 2
+        window = list(self._history)
+        first_half_mean = statistics.mean(window[:half])
+        second_half_mean = statistics.mean(window[half:])
+        trend = second_half_mean - first_half_mean
+        if abs(trend) > self._drift_threshold:
+            return False, (
+                f"RAW VALUE TREND: sustained {trend:+.4f} Hz drift within "
+                f"a {self._window_size}-window span (early-half mean "
+                f"{first_half_mean:.4f}, late-half mean {second_half_mean:.4f}) "
+                f"-- real ENF doesn't sustain a directional trend this "
+                f"large this consistently"
+            )
+        return True, "ok"
 
 
 class _NLRRangeCheck:
@@ -824,6 +923,7 @@ class Verifier:
         self._continuity_check    = _ENFContinuityCheck()
         self._drift_monitor       = _DriftMonitor()
         self._local_cusum         = _LocalCUSUMDetector()
+        self._raw_drift_check     = _RawDriftCheck()
 
         # NLR checks -- multi-node aware, no configuration needed
         self._nlr_range_check        = _NLRRangeCheck()
@@ -886,6 +986,15 @@ class Verifier:
 
         if raw_freq is not None:
             passed, reason = self._nominal_range_check.check(raw_freq)
+            if not passed:
+                enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+                enf_reasons.append(reason)
+
+            # Independent of confidence entirely -- see _RawDriftCheck
+            # docstring for the gap this specifically closes (slow ramp
+            # attacks that don't disrupt window-to-window correlation
+            # early on).
+            passed, reason = self._raw_drift_check.check(raw_freq)
             if not passed:
                 enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
                 enf_reasons.append(reason)
