@@ -191,13 +191,22 @@ def gather_inputs():
         (p.name for p in dataset_path.iterdir() if p.is_dir()),
         key=_node_sort_key,
     )
-    if not node_options:
-        raise RuntimeError(f"No node-count folders found in {dataset_path}")
-
-    node_folder_name = prompt_choice(
-        f"How many nodes? (options found under {dataset_name})", node_options
-    )
-    node_folder = dataset_path / node_folder_name
+    if node_options:
+        node_folder_name = prompt_choice(
+            f"How many nodes? (options found under {dataset_name})", node_options
+        )
+        node_folder = dataset_path / node_folder_name
+    else:
+        # No Nnode subfolders under this dataset (confirmed 2026-07:
+        # not every dataset has them the way the two training datasets
+        # tested earlier did -- inference_offline_llama3_70b has files
+        # directly inside it instead). Use the dataset folder itself.
+        # The ACTUAL node count gets determined later from what
+        # discover_nlr_pairs() really finds there, in stage_1 -- not
+        # guessed from a folder name that may not exist.
+        print(f"  (no node-count subfolders under {dataset_name} -- using its files directly)")
+        node_folder = dataset_path
+        node_folder_name = None
 
     slurm_id = None
     if workload_type == "training":
@@ -297,17 +306,19 @@ def stage_1_ingest_and_smooth(args) -> Path:
     node_windows = load_nlr_multi(pairs)
     records = build_combined_records(enf, node_windows)
 
-    # Named after the actual node folder the user selected (e.g.
-    # "run_4node.jsonl", "run_1node.jsonl") -- traceable to the real
-    # choice made in gather_inputs(), rather than a hardcoded guess.
+    # Node count comes from what discover_nlr_pairs() ACTUALLY found
+    # (len(pairs)) -- not from a folder name, which may not exist at
+    # all (confirmed 2026-07: not every dataset has Nnode subfolders,
+    # e.g. inference_offline_llama3_70b has files directly inside it
+    # instead). This is robust to either folder structure. Stored on
+    # args so stage_2 can pass the same real count to attack.py's
+    # --nodes without needing to re-derive or guess it.
     #
     # CONFIRMED 2026-07 from reading attack.py's actual source: it
     # constructs exactly f"run_{args.nodes}node.jsonl", where
     # args.nodes comes from its own --nodes CLI argument (default 2).
-    # stage_2 passes --nodes matching this exact filename, so any
-    # node count works correctly now -- no longer limited to 2-node
-    # runs the way earlier versions of this pipeline assumed.
-    out_filename = f"run_{getattr(args, 'node_folder_name', None) or '2node'}"
+    args.actual_node_count = len(pairs)
+    out_filename = f"run_{args.actual_node_count}node"
     out_path = Path(args.output_dir) / f"{out_filename}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_combined_jsonl(records, str(out_path))
@@ -322,9 +333,13 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     INPUT: takes a real CLI argument, --nodes N (default 2), used to
     construct exactly f"run_{N}node.jsonl" in data/combined/. This
     generalizes cleanly -- no more "only works for 2-node runs"
-    limitation. Passed here as whatever node count was actually
-    selected in gather_inputs(), kept in sync with stage_1's output
-    filename since both derive from the same node_folder_name.
+    limitation. Passed here as args.actual_node_count, which stage_1
+    sets from len(pairs) -- the REAL count of nodes discover_nlr_pairs()
+    actually found, not a count parsed from a folder name (which may
+    not exist at all -- confirmed 2026-07 that not every dataset has
+    Nnode subfolders the way the two training datasets tested earlier
+    did). Kept in sync with stage_1's output filename since both
+    derive from this same real count.
 
     OUTPUT: writes TWO files per run to lanes/marchisano_attacks/outputs/:
     attack_{id}.jsonl (no ground truth) AND attack_{id}_check.jsonl
@@ -355,7 +370,7 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     before = set(output_dir.glob("attack_*_check.jsonl"))
 
-    node_count = _node_sort_key(getattr(args, "node_folder_name", None) or "2node")
+    node_count = args.actual_node_count
 
     print(f"[2/4] Launching attack.py --nodes {node_count} "
           f"(reads {clean_path}) ...")

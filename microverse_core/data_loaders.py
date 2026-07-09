@@ -391,8 +391,24 @@ _NLR_MAX_WINDOWS = 1800
 _NLR_DATETIME_FORMAT = "%Y-%m-%d_%H:%M:%S.%f"
 
 # Regex patterns for node ID and SLURM ID extraction
-_NODE_ID_PATTERN_NEW = re.compile(r'node_([^.]+)\.log$', re.IGNORECASE)
-_NODE_ID_PATTERN_OLD = re.compile(r'wattameter_([^.]+)\.log$', re.IGNORECASE)
+#
+# FIXED (2026-07): the old two-pattern approach (_NODE_ID_PATTERN_NEW
+# looking for "node_...", _NODE_ID_PATTERN_OLD looking for
+# "wattameter_...") broke on a real, previously-unseen filename
+# convention: nvml_wattameter_11763012-x3101c0s37b0n0.log (an
+# inference run-number prefix, no "node_" text at all). The OLD
+# pattern still matched (since "wattameter_" is present) but captured
+# "11763012-x3101c0s37b0n0" -- the run number incorrectly included as
+# part of the node ID, silently polluting every downstream column name
+# and component ID.
+#
+# Fixed by matching the actual SHAPE of a node ID directly (xNcNsNbNnN)
+# anywhere in the filename, rather than "whatever text follows a
+# specific prefix". Robust regardless of what precedes it -- tested
+# against every real filename convention seen in this project:
+# training (..._slurmid_N_node_X.log), inference/offline
+# (wattameter_X.log), and inference/online (wattameter_N-X.log).
+_NODE_ID_PATTERN = re.compile(r'(x\d+c\d+s\d+b\d+n\d+)', re.IGNORECASE)
 _SLURM_ID_PATTERN   = re.compile(r'slurmid_(\d+)', re.IGNORECASE)
 
 # Device power limits -- readings above these are hardware errors
@@ -545,22 +561,17 @@ def _unwrap_uj_series(
 
 def _extract_node_id(filename: str) -> Optional[str]:
     """
-    Extracts the node identifier from a wattmeter log filename.
-
-    Handles two naming conventions:
-      New: nvml_wattameter_emissions_parsed_slurmid_10742842_node_x3105c0s41b0n0.log
-             -> "x3105c0s41b0n0"
-      Old: nvml_wattameter_x3115c0s33b0n0.log
-             -> "x3115c0s33b0n0"
+    Extracts the node identifier from a wattmeter log filename by
+    matching its actual shape (xNcNsNbNnN) directly, rather than
+    relying on what text happens to precede it. Handles every real
+    naming convention seen in this project:
+      Training:            ..._slurmid_10742842_node_x3105c0s41b0n0.log
+      Inference (offline):  nvml_wattameter_x3115c0s33b0n0.log
+      Inference (online):   nvml_wattameter_11763012-x3101c0s37b0n0.log
     """
     name = Path(filename).name
-    m = _NODE_ID_PATTERN_NEW.search(name)
-    if m:
-        return m.group(1)
-    m = _NODE_ID_PATTERN_OLD.search(name)
-    if m:
-        return m.group(1)
-    return None
+    m = _NODE_ID_PATTERN.search(name)
+    return m.group(1) if m else None
 
 
 def _detect_sample_rate_hz(path: str, n_samples: int = 30) -> float:
