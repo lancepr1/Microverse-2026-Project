@@ -1,16 +1,17 @@
 """
-ui/charts.py — two time-series plots: PDU line frequency (Hz) and total
-rack power draw (W), both built straight from data_feed.poll() output.
+ui/charts.py — per-node rolling history buffers and the rack-panel power/
+temperature figures built from them for the Analyst tab.
 
-FRQ_NOMINAL_HZ is a reference line only (US grid nominal, 60 Hz) — it is
-not a pass/fail threshold. Anomaly/verification thresholds are out of
-scope for this module; see README for what's intentionally left open.
+Replaces the old single-run PDU Frequency/Power Consumption charts (which
+plotted whichever one legacy run data_feed.get_rack_id() had loaded) with
+rack-centric multi-node figures fed by data_feed.poll_all() via
+operator-state-store (see ui/analyst.py, which owns the layout + the
+callback that drives these builders once per tick).
 
-get_figures() is called once per tick by the main polling callback in
-main.py; it rebuilds both figures from the buffered deques below, windowed
-to whatever time range is currently selected. update_charts() only
-appends to those buffers — it does not build figures itself, so the
-windowed x-axis keeps sliding on every tick even between new samples.
+TIME_RANGE_CONFIG/_current_range/_auto_follow/_paused are unchanged from
+the single-run version -- the same Time Range selector and pause/resume
+toggle still drive every chart, just against the new per-node buffers
+instead of the old single-series deques.
 """
 import time
 from datetime import datetime
@@ -18,23 +19,27 @@ from collections import deque
 
 import plotly.graph_objects as go
 
-MAX_POINTS      = 90_000
-SAMPLE_INTERVAL = 1.0
-FRQ_NOMINAL_HZ  = 60.0
-FRQ_HEIGHT      = 200
-POWER_HEIGHT    = 150
+from data_feed import node_display_label
 
-RACK_ID = "Rack_01"
-
-COLOR_LINE      = "rgb(0, 150, 70)"
-COLOR_THRESHOLD = "rgb(180, 150, 0)"
-COLOR_LABEL     = "rgb(90, 90, 90)"
-COLOR_TEXT      = "rgb(30, 30, 30)"
-COLOR_PLOT_BG   = "rgb(255, 255, 255)"
-COLOR_BORDER    = "rgb(210, 210, 210)"
-COLOR_GRID      = "rgb(220, 220, 220)"
+COLOR_LABEL     = "#64748b"
+COLOR_TEXT      = "#0f172a"
+COLOR_PLOT_BG   = "#ffffff"
+COLOR_BORDER    = "#e8eaed"
+COLOR_GRID      = "#f1f5f9"
 COLOR_LEGEND_BG = "rgba(255, 255, 255, 0.9)"
-COLOR_CHART_BUTTON = ""
+
+# Fixed color-by-position-in-rack mapping: node index 0-3 within a rack
+# always gets the same hue, on every rack panel and on both its power and
+# temp chart, so identity reads consistently across the whole tab. These
+# are the dataviz skill's validated categorical slots 1-4 (light-mode
+# worst-adjacent CVD ΔE 24.2, in their documented fixed order) -- not a new
+# palette, just reusing that skill's default categorical ramp.
+NODE_COLORS = [
+    "rgb(42, 120, 214)",   # slot 1 -- blue
+    "rgb(27, 175, 122)",   # slot 2 -- aqua
+    "rgb(237, 161, 0)",    # slot 3 -- yellow
+    "rgb(0, 131, 0)",      # slot 4 -- green
+]
 
 TIME_RANGE_CONFIG = {
     "10 Sec":   {"window": 10,    "tick_step": 2,     "fmt": "%H:%M:%S"},
@@ -47,19 +52,10 @@ TIME_RANGE_CONFIG = {
 }
 ALL_TICK_COUNT = 7
 
-frq_x   = deque(maxlen=MAX_POINTS)
-frq_y   = deque(maxlen=MAX_POINTS)
-power_x = deque(maxlen=MAX_POINTS)
-power_y = deque(maxlen=MAX_POINTS)
-
-_t0             = [time.time()]
-_last_plot_time = [0.0]
-_accum_frq      = []
-_accum_power    = []
-_current_range  = ["10 Sec"]
-_auto_follow    = [True]
-_paused         = [False]
-_frozen_figures = [None, None]
+_t0            = [time.time()]
+_current_range = ["10 Sec"]
+_auto_follow   = [True]
+_paused        = [False]
 
 
 def set_time_range(label: str):
@@ -78,14 +74,6 @@ def get_auto_follow():
 
 
 def set_paused(enabled: bool):
-    """Freeze/unfreeze the chart display only. Does not affect the rack
-    card, KPIs, or detail panel, which are driven separately from the same
-    poll() output in main.py."""
-    if enabled and not _paused[0]:
-        _frozen_figures[0], _frozen_figures[1] = _compute_figures()
-    elif not enabled and _paused[0]:
-        _frozen_figures[0] = None
-        _frozen_figures[1] = None
     _paused[0] = enabled
 
 
@@ -93,125 +81,117 @@ def get_paused():
     return _paused[0]
 
 
-def update_charts(state: dict):
+# --- Per-node rack-centric history (Analyst tab rack panels) ---------------
+#
+# One rolling buffer per node, holding both metrics the rack panels chart
+# (total power, average GPU temp) against a shared timestamp axis, since
+# both come from the same data_feed.poll_all() sample per node per tick.
+#
+# NODE_BUFFER_MAXLEN is sized for a 1-hour "All"-adjacent window at a
+# 2-second sampling cadence (1800 points), per spec -- data_feed.py's
+# actual replay pacing (REPLAY_INTERVAL_S) is currently faster than that,
+# so at today's replay speed the buffer holds less than an hour of
+# wall-clock time; the depth is intentionally pinned to the 2-second-cadence
+# target rather than derived from the replay's current speed.
+NODE_BUFFER_MAXLEN = 1800
+
+_node_history = {}  # node_id -> {"t": deque, "power": deque, "temp": deque}
+
+
+def _node_buffer(node_id: str) -> dict:
+    if node_id not in _node_history:
+        _node_history[node_id] = {
+            "t":     deque(maxlen=NODE_BUFFER_MAXLEN),
+            "power": deque(maxlen=NODE_BUFFER_MAXLEN),
+            "temp":  deque(maxlen=NODE_BUFFER_MAXLEN),
+        }
+    return _node_history[node_id]
+
+
+def update_node_history(state: dict) -> None:
+    """Appends one point per node to the rolling per-node buffers above,
+    from data_feed.poll_all() output routed in via operator-state-store
+    (see ui/operator.py) -- this must never call poll_all() itself, since
+    poll_all() advances a shared replay cursor and can only be called once
+    per tick. Paused stops accumulation, so a frozen display doesn't
+    silently keep buffering behind it."""
     if _paused[0]:
         return
     if not state:
         return
 
-    data = state.get(RACK_ID)
-    if not data:
-        return
-
-    try:
-        _accum_frq.append(float(data.get("frq_hz", FRQ_NOMINAL_HZ)))
-    except (ValueError, TypeError):
-        pass
-    try:
-        _accum_power.append(float(data.get("total_power_w", 0.0)))
-    except (ValueError, TypeError):
-        pass
-
-    now = time.time()
-    if now - _last_plot_time[0] < SAMPLE_INTERVAL:
-        return
-    _last_plot_time[0] = now
-
-    t = now - _t0[0]
-
-    if _accum_frq:
-        avg = sum(_accum_frq) / len(_accum_frq)
-        frq_x.append(t)
-        frq_y.append(avg)
-        _accum_frq.clear()
-
-    if _accum_power:
-        avg = sum(_accum_power) / len(_accum_power)
-        power_x.append(t)
-        power_y.append(avg)
-        _accum_power.clear()
+    now = time.time() - _t0[0]
+    for node_id, data in state.items():
+        buf = _node_buffer(node_id)
+        buf["t"].append(now)
+        buf["power"].append(data.get("total_power_w"))
+        buf["temp"].append(data.get("average_gpu_temp_c"))
 
 
-def reset_charts():
-    frq_x.clear()
-    frq_y.clear()
-    power_x.clear()
-    power_y.clear()
-    _accum_frq.clear()
-    _accum_power.clear()
-    _t0[0] = time.time()
-    _last_plot_time[0] = 0.0
+def get_node_history_lengths() -> dict:
+    """Debug/verification helper: current buffer length per node (the
+    three deques for a given node are always the same length, so "t" is
+    representative of all of them)."""
+    return {node_id: len(buf["t"]) for node_id, buf in _node_history.items()}
 
 
-def build_figures():
-    """Initial empty figures for the layout, before any state has been
-    polled."""
-    return get_figures()
-
-
-def get_figures():
-    if _paused[0] and _frozen_figures[0] is not None:
-        return tuple(_frozen_figures)
-    return _compute_figures()
-
-
-def _compute_figures():
+def _current_window():
     cfg    = TIME_RANGE_CONFIG[_current_range[0]]
     window = cfg["window"]
     now_t  = time.time() - _t0[0]
 
     if window is None:
-        x_min, x_max = 0, max(now_t, 1)
-    else:
-        x_max = max(now_t, window)
-        x_min = x_max - window
-
-    fx, fy = list(frq_x), list(frq_y)
-    px, py = list(power_x), list(power_y)
-
-    x_range = None
-    ticks = None
-    if _auto_follow[0]:
-        if fx:
-            pairs = [(x, y) for x, y in zip(fx, fy) if x_min <= x <= x_max]
-            if pairs:
-                fx, fy = [p[0] for p in pairs], [p[1] for p in pairs]
-        if px:
-            pairs = [(x, y) for x, y in zip(px, py) if x_min <= x <= x_max]
-            if pairs:
-                px, py = [p[0] for p in pairs], [p[1] for p in pairs]
-
-        x_range = [x_min, x_max]
-        ticks = _build_ticks(x_min, x_max, cfg)
-
-    frq_fig   = _build_frq_figure(fx, fy, x_range, ticks, now_t)
-    power_fig = _build_power_figure(px, py, x_range, ticks)
-    return frq_fig, power_fig
+        return 0, max(now_t, 1), cfg
+    x_max = max(now_t, window)
+    return x_max - window, x_max, cfg
 
 
-def _build_frq_figure(fx, fy, x_range, ticks, now_t):
+def _windowed(tx, ty, x_min, x_max):
+    if not (_auto_follow[0] and tx):
+        return tx, ty
+    pairs = [(x, y) for x, y in zip(tx, ty) if x_min <= x <= x_max]
+    return ([p[0] for p in pairs], [p[1] for p in pairs]) if pairs else (tx, ty)
+
+
+DIMMED_OPACITY = 0.15
+
+
+def build_rack_power_figure(node_ids: list[str], isolated_node: str | None = None) -> go.Figure:
+    """One line per node in node_ids, in NODE_COLORS order (position in
+    rack -> color), windowed to the current Time Range selection.
+    isolated_node, if set, is drawn at full opacity while every other node
+    in this figure is dimmed (see ui/analyst.py's click-to-isolate
+    callback, which tracks isolated_node per rack)."""
+    return _build_multi_line_figure(node_ids, "power", y_title="Watts", isolated_node=isolated_node)
+
+
+def build_rack_temp_figure(node_ids: list[str], isolated_node: str | None = None) -> go.Figure:
+    """Same shape as build_rack_power_figure, reading the "temp" series so
+    a node's power and temp lines share NODE_COLORS' position-based color
+    -- and the same isolated_node, so isolating a node dims its
+    counterpart line on both charts together."""
+    return _build_multi_line_figure(node_ids, "temp", y_title="°C", isolated_node=isolated_node)
+
+
+def _build_multi_line_figure(
+    node_ids: list[str], metric: str, y_title: str, isolated_node: str | None = None,
+) -> go.Figure:
+    x_min, x_max, cfg = _current_window()
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=fx, y=fy, mode="lines", name=RACK_ID,
-        line=dict(color=COLOR_LINE, width=1.5)
-    ))
-    nominal_x_max = max(now_t, 1)
-    fig.add_trace(go.Scatter(
-        x=[0, nominal_x_max], y=[FRQ_NOMINAL_HZ, FRQ_NOMINAL_HZ],
-        mode="lines", name="Nominal (60 Hz)",
-        line=dict(color=COLOR_THRESHOLD, width=1, dash="dash")
-    ))
-    _apply_layout(fig, x_range, ticks, y_title="Hz")
-    return fig
+    for i, node_id in enumerate(node_ids):
+        buf = _node_buffer(node_id)
+        tx, ty = list(buf["t"]), list(buf[metric])
+        tx, ty = _windowed(tx, ty, x_min, x_max)
+        opacity = 1.0 if isolated_node in (None, node_id) else DIMMED_OPACITY
+        fig.add_trace(go.Scatter(
+            x=tx, y=ty, mode="lines", name=node_display_label(node_id), opacity=opacity,
+            line=dict(color=NODE_COLORS[i % len(NODE_COLORS)], width=1.5),
+        ))
 
-
-def _build_power_figure(px, py, x_range, ticks):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=px, y=py, mode="lines", name=RACK_ID,
-        line=dict(color=COLOR_LINE, width=1.5)
-    ))
-    _apply_layout(fig, x_range, ticks, y_title="Watts")
+    x_range = [x_min, x_max] if _auto_follow[0] else None
+    ticks = _build_ticks(x_min, x_max, cfg) if _auto_follow[0] else None
+    _apply_layout(fig, x_range, ticks, y_title=y_title)
     return fig
 
 
@@ -225,6 +205,7 @@ def _apply_layout(fig, x_range, ticks, y_title):
         xaxis["ticktext"] = [label for label, _ in ticks]
 
     fig.update_layout(
+        uirevision="rack-charts",
         margin=dict(l=50, r=10, t=10, b=30),
         plot_bgcolor=COLOR_PLOT_BG,
         paper_bgcolor=COLOR_PLOT_BG,
