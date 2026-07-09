@@ -18,8 +18,6 @@ POLL_INTERVAL_MS = 250
 
 FRQ_HZ_DEFAULT = "-- Hz"
 
-COLOR_GREEN = "rgb(0, 150, 70)"
-
 
 def build_layout() -> html.Div:
     return html.Div(className="app", children=[
@@ -29,8 +27,10 @@ def build_layout() -> html.Div:
             html.Span("AFRL Microverse — Data Center Dashboard",
                       className="header-title"),
             html.Span("FRQ:", className="label"),
-            html.Span(FRQ_HZ_DEFAULT, id="header-frq-hz",
-                      style={"color": COLOR_GREEN}),
+            html.Div(className="frq-readout", children=[
+                html.Span(className="live-pulse-dot"),
+                html.Span(FRQ_HZ_DEFAULT, id="header-frq-hz"),
+            ]),
         ]),
         html.Hr(),
 

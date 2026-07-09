@@ -19,11 +19,13 @@ from collections import deque
 
 import plotly.graph_objects as go
 
-COLOR_LABEL     = "rgb(90, 90, 90)"
-COLOR_TEXT      = "rgb(30, 30, 30)"
-COLOR_PLOT_BG   = "rgb(255, 255, 255)"
-COLOR_BORDER    = "rgb(210, 210, 210)"
-COLOR_GRID      = "rgb(220, 220, 220)"
+from data_feed import node_display_label
+
+COLOR_LABEL     = "#64748b"
+COLOR_TEXT      = "#0f172a"
+COLOR_PLOT_BG   = "#ffffff"
+COLOR_BORDER    = "#e8eaed"
+COLOR_GRID      = "#f1f5f9"
 COLOR_LEGEND_BG = "rgba(255, 255, 255, 0.9)"
 
 # Fixed color-by-position-in-rack mapping: node index 0-3 within a rack
@@ -183,7 +185,7 @@ def _build_multi_line_figure(
         tx, ty = _windowed(tx, ty, x_min, x_max)
         opacity = 1.0 if isolated_node in (None, node_id) else DIMMED_OPACITY
         fig.add_trace(go.Scatter(
-            x=tx, y=ty, mode="lines", name=node_id, opacity=opacity,
+            x=tx, y=ty, mode="lines", name=node_display_label(node_id), opacity=opacity,
             line=dict(color=NODE_COLORS[i % len(NODE_COLORS)], width=1.5),
         ))
 
@@ -203,6 +205,7 @@ def _apply_layout(fig, x_range, ticks, y_title):
         xaxis["ticktext"] = [label for label, _ in ticks]
 
     fig.update_layout(
+        uirevision="rack-charts",
         margin=dict(l=50, r=10, t=10, b=30),
         plot_bgcolor=COLOR_PLOT_BG,
         paper_bgcolor=COLOR_PLOT_BG,

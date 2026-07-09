@@ -9,7 +9,7 @@ register their own smaller callbacks as a side effect of being imported.
 from dash import Dash, Output, Input, no_update
 
 from ui.layout import build_layout, render_header_frq
-import ui.controls      # noqa: F401 -- registers the controls-store callback
+import ui.controls   # noqa: F401 -- registers the controls-store callback
 import ui.blender_feed  # noqa: F401 -- registers the Blender image callback
 import ui.tabs          # noqa: F401 -- registers the tab-switch callbacks
 import ui.operator      # noqa: F401 -- registers the Operator tab callbacks

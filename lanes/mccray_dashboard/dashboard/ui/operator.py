@@ -32,20 +32,47 @@ client-side n_clicks/selection state -- are never touched by a data tick.
 """
 from dash import html, dcc, callback, Input, Output, State, ALL, MATCH, ctx, no_update
 
-from data_feed import list_node_ids, poll_all
+from data_feed import list_node_ids, poll_all, node_display_label
 
 RACK_SIZE = 4
 
-COLOR_TEXT    = "#e2e8f0"
-COLOR_LABEL   = "#4a5568"
-COLOR_DEFAULT = "#2d3748"
-COLOR_NOMINAL = "rgb(0, 150, 70)"
-COLOR_WARNING = "rgb(200, 150, 0)"
-COLOR_ALERT   = "rgb(200, 50, 50)"
+COLOR_TEXT    = "#0f172a"
+COLOR_LABEL   = "#64748b"
+COLOR_DEFAULT = "#e2e8f0"
+COLOR_NOMINAL = "#16a34a"
+COLOR_WARNING = "#d97706"
+COLOR_ALERT   = "#dc2626"
 
 _STATUS_TO_LABEL  = {"good": "Nominal", "suspect": "Warning", "warning": "Alert"}
+_STATUS_TO_BADGE  = {"good": "NOM", "suspect": "WRN", "warning": "ALR"}
 _STATUS_TO_BORDER = {"good": COLOR_NOMINAL, "suspect": COLOR_WARNING, "warning": COLOR_ALERT}
 _STATUS_RANK      = {"good": 0, "suspect": 1, "warning": 2}
+
+# Badge background/border/text share one status hue (move 4); only the
+# alert badge blinks -- motion is reserved for what needs eyes.
+_STATUS_BADGE_STYLE = {
+    "good": {
+        "color": "var(--status-nominal-text)",
+        "backgroundColor": "var(--status-nominal-bg)",
+        "border": "1px solid var(--status-nominal-border)",
+    },
+    "suspect": {
+        "color": "var(--status-warning-text)",
+        "backgroundColor": "var(--status-warning-bg)",
+        "border": "1px solid var(--status-warning-border)",
+    },
+    "warning": {
+        "color": "var(--status-alert-text)",
+        "backgroundColor": "var(--status-alert-bg)",
+        "border": "1px solid var(--status-alert-border)",
+        "animation": "badge-blink 1.2s ease-in-out infinite",
+    },
+}
+_DEFAULT_BADGE_STYLE = {
+    "color": "var(--status-default-text)",
+    "backgroundColor": "var(--status-default-bg)",
+    "border": "1px solid var(--status-default-border)",
+}
 
 
 def get_rack_groups() -> list[tuple[str, list[str]]]:
@@ -69,9 +96,12 @@ def build_operator_tab() -> html.Div:
                 _build_rack_card(rack_label, node_ids)
                 for rack_label, node_ids in get_rack_groups()
             ]),
-            html.Div(id="operator-detail-container",
-                      className="panel operator-detail-panel",
-                      children=render_operator_detail(None, {})),
+            html.Div(className="panel operator-detail-panel", children=[
+                html.Div("Node Inspector", className="section-title"),
+                html.Hr(),
+                html.Div(id="operator-detail-container",
+                          children=render_operator_detail(None, {})),
+            ]),
         ]),
     ])
 
@@ -121,9 +151,9 @@ def _build_node_card(node_id):
         id={"type": "node-card-btn", "node_id": node_id},
         n_clicks=0,
         className="node-card",
-        style={"borderTopColor": COLOR_DEFAULT},
+        style={"borderLeftColor": COLOR_DEFAULT},
         children=[
-            html.Div(node_id, className="node-card-id"),
+            html.Div(node_display_label(node_id), className="node-card-id"),
             html.Div("-- W", id={"type": "node-card-power", "node_id": node_id},
                       className="mono-value"),
             html.Div("-- °C", id={"type": "node-card-temp", "node_id": node_id},
@@ -155,7 +185,7 @@ def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
     temp_text  = f"{temp:.1f} °C" if temp is not None else "-- °C"
 
     return html.Div(children=[
-        html.Div(selected_node, style={"color": COLOR_TEXT, "fontWeight": "700"}),
+        html.Div(node_display_label(selected_node), style={"color": COLOR_TEXT, "fontWeight": "700"}),
         html.Div(_rack_label_for(selected_node), className="label"),
         html.Hr(),
 
@@ -180,7 +210,7 @@ def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
         _detail_row("Next Event Type", "--"),
         _detail_row("Time to Next Event", "--"),
 
-        html.Div("AI Explanation", className="section-title"),
+        html.Div("AI Explanation", className="section-title ai-label"),
         html.Hr(),
         html.Div("AI explanation — pending model integration",
                   className="dimmed-block ai-explanation-box"),
@@ -259,15 +289,16 @@ def _on_node_card_data_update(state, btn_id):
 
     power_text    = f"{power:.1f} W" if power is not None else "-- W"
     temp_text     = f"{temp:.1f} °C" if temp is not None else "-- °C"
-    forecast_text = _STATUS_TO_LABEL.get(status, "--")
+    forecast_text = _STATUS_TO_BADGE.get(status, "--")
     border_color  = _STATUS_TO_BORDER.get(status, COLOR_DEFAULT)
+    badge_style   = _STATUS_BADGE_STYLE.get(status, _DEFAULT_BADGE_STYLE)
 
     return (
         power_text,
         temp_text,
         forecast_text,
-        {"color": border_color},
-        {"borderTopColor": border_color},
+        badge_style,
+        {"borderLeftColor": border_color},
     )
 
 
