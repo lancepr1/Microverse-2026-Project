@@ -45,7 +45,7 @@ def render_alert_timeline() -> html.Div:
 
     header = html.Tr([
         html.Th("Time"), html.Th("Rack"), html.Th("Node"), html.Th("Type"),
-        html.Th("Score"), html.Th("FRQ"), html.Th("Power"), html.Th("GPU Temp"),
+        html.Th("Score"), html.Th("Power"), html.Th("GPU Temp"),
         html.Th("Prediction"),
     ])
     body_rows = [
@@ -55,7 +55,6 @@ def render_alert_timeline() -> html.Div:
             html.Td(row["node_id"]),
             html.Td(row["alert_type"]),
             html.Td(f"{row['score']:.2f}" if row["score"] is not None else "--"),
-            html.Td(f"{row['frq_hz']:.2f} Hz" if row["frq_hz"] is not None else "--"),
             html.Td(f"{row['total_power_w']:.1f} W" if row["total_power_w"] is not None else "--"),
             html.Td(f"{row['average_gpu_temp_c']:.1f} °C" if row["average_gpu_temp_c"] is not None else "--"),
             html.Td(row["prediction"]),

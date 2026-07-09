@@ -8,7 +8,6 @@ from dash import html, dcc
 
 from data_feed import get_rack_id
 from ui.blender_feed import render_blender_feed
-from ui.controls import build_facility_control
 from ui.tabs import build_tab_bar, tab_content_style
 from ui.operator import build_operator_tab
 from ui.analyst import build_analyst_tab
@@ -35,7 +34,6 @@ def build_layout() -> html.Div:
         html.Hr(),
 
         build_tab_bar(),
-        build_facility_control(),
 
         html.Div(className="tab-content-panels", children=[
             html.Div(

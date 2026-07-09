@@ -28,11 +28,9 @@ def test_ui_charts_imports():
 
 
 def test_ui_controls_imports():
-    from ui.controls import build_chart_controls, build_facility_control, DEFAULT_CONTROLS
+    from ui.controls import build_chart_controls, DEFAULT_CONTROLS
     assert DEFAULT_CONTROLS["time_range"] == "10 Sec"
-    assert DEFAULT_CONTROLS["facility"] == "Inference"
     assert build_chart_controls() is not None
-    assert build_facility_control() is not None
 
 
 def test_no_microverse_core_dependency_anywhere():

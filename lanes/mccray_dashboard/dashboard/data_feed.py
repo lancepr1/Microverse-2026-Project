@@ -21,7 +21,7 @@ node files share the same index/timing (see data/README.md), so a single
 cursor paced against wall-clock time drives every node's replay position in
 lockstep, the same pacing model as the single-node path above.
 """
-import glob
+import json
 import os
 import re
 import time
@@ -30,6 +30,10 @@ from models import TelemetrySample
 import verification_feed
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+DASHBOARD_JSONL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..",
+    "leiva_verification", "outputs", "for_dashboard.jsonl",
+)
 REPLAY_INTERVAL_S = 1.0  # one recorded sample is "emitted" per second of replay
 
 _samples = []
@@ -38,7 +42,7 @@ _t0 = [0.0]
 _ready = [False]
 _rack_id = [None]
 
-_NODE_HOSTNAME_RE = re.compile(r"^node\d{2}$")
+_NODE_PREFIX_RE = re.compile(r"^(node\d+)_")
 
 
 def init_feed(run_file="run01.jsonl"):
@@ -113,43 +117,42 @@ _multi_max_len = [0]
 
 
 def list_node_ids() -> list[str]:
-    """Every node id ("node00".."node15") with a recording in DATA_DIR,
-    sorted. This is the Rack 1-4 grouping source for the Operator tab:
-    chunking this sorted list into groups of 4 gives Rack 1..4 (there is
-    no rack field in the recordings themselves -- see data/README.md).
-    run01.jsonl (the original single-node demo recording, not one of the
-    16 real nodes) is excluded by the node-id pattern match."""
-    paths = glob.glob(os.path.join(DATA_DIR, "*.jsonl"))
-    ids = [
-        os.path.splitext(os.path.basename(path))[0]
-        for path in paths
-        if _NODE_HOSTNAME_RE.match(os.path.splitext(os.path.basename(path))[0])
-    ]
+    """Every node id ("node00".."node15") embedded as a column prefix in
+    DASHBOARD_JSONL (e.g. "node00_gpu-0[W]" -> "node00"), sorted. Reads
+    just the first line, since every row shares the same columns. This is
+    the Rack 1-4 grouping source for the Operator tab: chunking this
+    sorted list into groups of 4 gives Rack 1..4 (there is no rack field
+    in the recording itself)."""
+    with open(DASHBOARD_JSONL) as f:
+        first_line = f.readline()
+    row = json.loads(first_line)
+    ids = {m.group(1) for key in row if (m := _NODE_PREFIX_RE.match(key))}
     return sorted(ids)
 
 
 def node_display_label(node_id: str) -> str:
     """Human-friendly "Node 00".."Node 15" label for a node id. Node ids
-    are already "node00".."node15" (the .jsonl filename stem -- see
-    data/README.md), so this just reformats the existing number."""
+    are already "node00".."node15" (the DASHBOARD_JSONL column prefix),
+    so this just reformats the existing number."""
     return f"Node {node_id.removeprefix('node')}"
 
 
 def init_multi_feed() -> None:
-    """Loads every node recording in DATA_DIR concurrently, so the Operator
-    tab can replay all 16 nodes' state in lockstep -- unlike init_feed(),
+    """Loads DASHBOARD_JSONL once and slices it per node, so the Operator
+    tab can replay all nodes' state in lockstep -- unlike init_feed(),
     which only ever replays one run file at a time."""
     _multi_samples.clear()
+    rows = []
+    with open(DASHBOARD_JSONL) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
     for node_id in list_node_ids():
-        path = os.path.join(DATA_DIR, f"{node_id}.jsonl")
-        samples = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                samples.append(TelemetrySample.from_json_line(line))
-        _multi_samples[node_id] = samples
+        _multi_samples[node_id] = [
+            TelemetrySample.from_dashboard_row(node_id, row) for row in rows
+        ]
         verification_feed.init_verifier(node_id)
 
     _multi_cursor[0] = 0

@@ -176,11 +176,9 @@ def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
     data   = state.get(selected_node, {})
     status = data.get("status", "--")
 
-    frq   = data.get("frq_hz")
     power = data.get("total_power_w")
     temp  = data.get("average_gpu_temp_c")
 
-    frq_text   = f"{frq:.2f} Hz" if frq is not None else "-- Hz"
     power_text = f"{power:.1f} W" if power is not None else "-- W"
     temp_text  = f"{temp:.1f} °C" if temp is not None else "-- °C"
 
@@ -196,7 +194,6 @@ def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
         html.Hr(),
         _detail_row("Power Draw", power_text),
         _detail_row("GPU Temp", temp_text),
-        _detail_row("Frequency", frq_text),
 
         html.Div("30-Second Forecast", className="section-title"),
         html.Hr(),
