@@ -15,6 +15,8 @@ shapes; replace them with the real anchoring and comparison.
 ## Who to ask
 Dr. Qu (methodology, ANCHOR-Grid), Lance (repo and integration).
 
+test
+
 ## Week-1 deliverable
 Two-paragraph design memo: how the anchor extractor reads ENF, what it outputs
 (timestamp, signature, confidence), how verification compares an anchor to a
