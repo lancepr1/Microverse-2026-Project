@@ -18,20 +18,24 @@ correctly too.
 
 STATUS OF EACH STAGE (2026-07):
     Stage 1 (ingest + smooth):    REAL, tested, working.
-    Stage 2 (attack injection):   Wired up against attack.py's current
-                                   (still-being-developed) behavior --
-                                   confirm it still works if that
-                                   changes on Ethan's end.
-    Stage 3 (verify + annotate):  REAL, tested, working -- this is the
-                                   same logic as verify_file.py,
-                                   refactored into an importable
-                                   function so this script can call it
-                                   in-process instead of shelling out.
-    Stage 4 (fork to 3 outputs):  PLACEHOLDER destinations, REAL file
-                                   writes -- writes to
-                                   lanes/leiva_verification/outputs/.
-                                   Replace with the real dashboard/
-                                   digital-twin integration once their
+    Stage 2 (attack injection):   Wired up against attack.py's real
+                                   confirmed behavior (--nodes CLI arg,
+                                   reads run_{N}node.jsonl, writes both
+                                   a plain and a _check file). Only the
+                                   plain file (no ground truth) is ever
+                                   fed to verification -- see
+                                   stage_2_inject_attacks()'s docstring
+                                   for why that boundary matters.
+    Stage 3 (verify + fork):      REAL, tested, working. Verifies and
+                                   writes directly to all three
+                                   destinations in one pass -- no
+                                   intermediate "anchor_verified.jsonl"
+                                   file, since all three destinations
+                                   were always identical copies of it
+                                   anyway. PLACEHOLDER destinations
+                                   (real files, not yet the real
+                                   dashboard/digital-twin integration)
+                                   -- replace once McCray's/Baron's
                                    expected interface is confirmed.
 
 USAGE (2026-07 redesign -- fully interactive, no CLI flags to remember):
@@ -327,17 +331,23 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     (same data, plus a 0/1 "attack" ground-truth column). {id} varies
     by which scenario got selected (interactively, or randomly for
     medium/hard preset scenarios) -- genuinely unpredictable in
-    advance, so still found via before/after directory diffing.
+    advance, so found via before/after directory diffing (globbing
+    specifically on "attack_*_check.jsonl" -- the broader
+    "attack_*.jsonl" would match both files written each run and
+    incorrectly trigger the "multiple new files" ambiguity path every
+    single time).
 
-    IMPORTANT FIX: must specifically glob "attack_*_check.jsonl", not
-    the broader "attack_*.jsonl" -- the broad pattern matches BOTH
-    files written each run, which would incorrectly trigger the
-    "multiple new files" ambiguity path on every single run. The
-    _check version is deliberately the one used here (not the plain
-    version) -- it carries ground truth alongside our verdict, which
-    is genuinely useful for the scoreboard, though worth confirming
-    with whoever owns it whether they want that ground-truth column
-    visible or stripped before it reaches them.
+    CRITICAL DESIGN RULE (2026-07, corrected after review): the
+    verifier must NEVER be given the ground-truth "attack" column --
+    that defeats the entire point of independent verification, even
+    though our Verifier class happens to ignore unknown fields today
+    (fragile to rely on that staying true). So this function returns
+    BOTH paths as a tuple: (plain_path, check_path). Only plain_path
+    (found by stripping "_check" off the discovered check_path's name)
+    goes anywhere near stage_3/verification. check_path is carried
+    forward untouched, used only at the very end for scoring -- see
+    stage_4, which sends it to the scoreboard specifically and nowhere
+    else.
     """
     import subprocess
 
@@ -373,16 +383,53 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
               f"{sorted(new_files)} -- using the most recently modified one, "
               f"but this ambiguity is worth understanding, not just working around.")
 
-    attacked_path = max(new_files, key=lambda p: p.stat().st_mtime)
-    print(f"[2/4] attack.py finished -> {attacked_path}")
-    return attacked_path
+    check_path = max(new_files, key=lambda p: p.stat().st_mtime)
+
+    # CRITICAL: the verifier must NEVER see the ground-truth "attack"
+    # column -- that would undermine the entire point of independent
+    # verification. attack.py writes a PLAIN file alongside the _check
+    # one (same scenario ID, no ground truth added) -- that's what
+    # gets fed into stage 3, not this _check file. check_path is only
+    # used here, internally, to reliably locate plain_path -- Ethan
+    # handles ground truth/scoring separately with his own copy of the
+    # _check file, so nothing downstream of this function needs it.
+    plain_path = check_path.parent / check_path.name.replace("_check.jsonl", ".jsonl")
+    if not plain_path.exists():
+        raise FileNotFoundError(
+            f"Found {check_path} but its plain (no-ground-truth) counterpart "
+            f"{plain_path} doesn't exist -- attack.py is expected to write "
+            f"both every run. Verification cannot proceed safely without "
+            f"the plain file, since the _check file must never be what the "
+            f"verifier actually processes."
+        )
+
+    print(f"[2/4] attack.py finished -> {plain_path} (fed to verifier)")
+    return plain_path
 
 
-def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
+def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     """
-    Runs verification, produces the status-annotated JSONL -- same
-    logic as verify_file.py (0.0=trusted, 0.5=suspect, 1.0=failed,
-    worst-of across every component checked each window).
+    Runs verification (same logic as verify_file.py -- 0.0=trusted,
+    0.5=suspect, 1.0=failed, worst-of across every component checked
+    each window) and writes the result DIRECTLY to all three
+    destinations in one pass -- no "anchor_verified.jsonl"
+    intermediate file, since all three destinations were always going
+    to be identical copies of it anyway. Writing three file handles
+    at once instead of writing once then copying twice.
+
+    PLACEHOLDER destinations -- currently just three real files with
+    identical content:
+        for_scoreboard.jsonl
+        for_dashboard.jsonl
+        for_digital_twin.jsonl
+    Replace with the real dashboard/digital-twin integration once
+    their expected interface (file path? socket? HTTP endpoint?) is
+    confirmed with McCray/Baron.
+
+    Ground truth is never included here -- verifies attacked_path,
+    which is the PLAIN file with no "attack" column (see stage_2).
+    Ethan maintains his own ground-truth copy for scoring/metrics
+    separately -- not this pipeline's concern.
     """
     from anchor import AnchorExtractor
     from verification import Verifier
@@ -396,8 +443,16 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
     STATUS_RANK = {"trusted": 0, "suspect": 1, "failed": 2}
     STATUS_SCORE = {"trusted": 0.0, "suspect": 0.5, "failed": 1.0}
 
-    out_path = Path(args.output_dir) / "anchor_verified.jsonl"
-    with open(out_path, "w") as out_fh:
+    out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    destinations = {
+        "scoreboard": out_dir / "for_scoreboard.jsonl",
+        "dashboard": out_dir / "for_dashboard.jsonl",
+        "digital_twin": out_dir / "for_digital_twin.jsonl",
+    }
+    handles = {name: open(path, "w") for name, path in destinations.items()}
+
+    try:
         for record in records:
             scoreboard_record = dict(record)
             record = dict(record)
@@ -413,34 +468,14 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
                     worst = result.status
             scoreboard_record["status"] = STATUS_SCORE[worst]
 
-            out_fh.write(json.dumps(scoreboard_record) + "\n")
+            line = json.dumps(scoreboard_record) + "\n"
+            for fh in handles.values():
+                fh.write(line)
+    finally:
+        for fh in handles.values():
+            fh.close()
 
-    print(f"[3/4] Wrote {len(records)} verified records -> {out_path}")
-    return out_path
-
-
-def stage_4_fork_outputs(verified_path: Path, args) -> None:
-    """
-    PLACEHOLDER. Sends the verified, annotated JSONL to three
-    destinations: scoreboard, dashboard, digital twin.
-
-    Writes to lanes/leiva_verification/outputs/ -- currently three
-    file copies to conventionally-named paths. Replace with the real
-    dashboard/digital-twin integration once their expected interface
-    (file path? socket? HTTP endpoint?) is confirmed with McCray/Baron.
-    """
-    import shutil
-    out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    destinations = {
-        "scoreboard": out_dir / "for_scoreboard.jsonl",
-        "dashboard": out_dir / "for_dashboard.jsonl",
-        "digital_twin": out_dir / "for_digital_twin.jsonl",
-    }
-    for name, dest in destinations.items():
-        shutil.copy(str(verified_path), str(dest))
-
-    print(f"[4/4] Forked output to:")
+    print(f"[3/4] Wrote {len(records)} verified records to 3 destinations:")
     for name, dest in destinations.items():
         print(f"       {name:14s} -> {dest}")
 
@@ -449,8 +484,7 @@ def main():
     args = gather_inputs()
     clean_path = stage_1_ingest_and_smooth(args)
     attacked_path = stage_2_inject_attacks(clean_path, args)
-    verified_path = stage_3_verify_and_annotate(attacked_path, args)
-    stage_4_fork_outputs(verified_path, args)
+    stage_3_verify_and_fork(attacked_path, args)
 
 
 if __name__ == "__main__":
