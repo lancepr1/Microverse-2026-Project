@@ -413,7 +413,7 @@ def main():
 
     # -----------------------------------------------------------------
     # EXECUTION OF MATH ENGINE PIPELINE
-    # --------------------------------=================================
+    # -----------------------------------------------------------------
     start_idx = int(total_rows * start_pct)
     end_idx = int(total_rows * end_pct)
     targets = schema.get(target_group, schema["all"])
@@ -440,8 +440,9 @@ def main():
     print(f"\nWriting files to: '{OUTPUT_DIR}'...")
     with open(output_main, "w") as f_main, open(output_check, "w") as f_check:
         for row, is_attack in zip(modified_data, attack_labels):
+            # Formatted inline guard to preserve raw FRQ float data
             formatted_row = {
-                k: (round(v, 1) if "uJ" in k else round(v, 4)) if isinstance(v, float) else v 
+                k: (v if k == "FRQ" else (round(v, 1) if "uJ" in k else round(v, 4))) if isinstance(v, float) else v 
                 for k, v in row.items()
             }
             
