@@ -159,7 +159,7 @@ CPU_UJ_WRAP_TOLERANCE =  2_000_000_000
 
 GPU_TEMP_FLOOR_C    = 0.0    # a GPU under any load at/below 0C is a stuck/fabricated sensor
 GPU_TEMP_CEILING_C  = 95.0   # datacenter GPUs throttle/shutdown in the 83-95C range
-GPU_TEMP_MAX_STEP_C = 15.0   # placeholder max plausible swing per ENF window
+GPU_TEMP_MAX_STEP_C = 8.0    # RECALIBRATED (2026-07) from the original 15.0 placeholder, which was never once crossed across 14,400 real step observations (max observed real step was 13.80C) -- meaning it provided no real detection power at all, only ever tested as "never fires." 8.0 sits comfortably above the real P99 (5.10C). Matches the same pattern already found for CPU_MAX_STEP_W: 91.4% of what this threshold catches (32/35 exceedances) falls in the first 150 windows -- the known, already-documented startup-ramp period, not a new phenomenon. Only 3 genuine steady-state exceedances remain across ~1650 windows. Calibrated against exactly one real file (run_2node.jsonl) -- revisit if a second real file shows meaningfully different behavior.
 
 # Derived (not arbitrary): CPU_POWER_CEILING_W for one ENF window,
 # converted to uJ, with a 1.5x safety margin.
