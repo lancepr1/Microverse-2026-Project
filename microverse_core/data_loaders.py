@@ -42,6 +42,7 @@ import json
 import math
 import random
 import re
+import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,273 @@ def load_enf(path: str) -> list[float]:
     return values
 
 
+# ---------------------------------------------------------------------------
+# ENF cleaning -- OPTIONAL, explicit step. NOT called automatically by
+# load_enf() -- call it yourself in the pipeline (e.g. pipeline_test.py)
+# right after load_enf(), so the transformation is visible and auditable
+# rather than hidden inside loading.
+#
+# Found via diagnose_enf_glitch.py against 24 real AFRL recordings
+# (3 devices, ~20 hours): every file showed a systematic pattern of
+# large single-step jumps (mean 19.0% of all steps > 1.0 Hz across the
+# 24 files), including some mathematically impossible single-sample
+# readings (negative Hz, >100 Hz). Confirmed via raw CSV row inspection
+# this is NOT a parsing bug -- the implausible values are genuinely
+# written in the source files.
+#
+# This function detects and corrects both:
+#   - physically impossible single readings (outside a wide sanity
+#     range) -- unambiguous, no real grid frequency is negative or >80Hz
+#   - the pervasive large-step pattern, via a Hampel filter (rolling
+#     median + MAD-based outlier detection)
+#
+# IMPORTANT, validated finding: replacing detected outliers with the
+# local median (the textbook Hampel filter) creates runs of EXACTLY
+# repeated values, which collapses the natural micro-variance that
+# AnchorExtractor's Pearson-correlation confidence metric depends on --
+# this was measured to make downstream confidence WORSE, not better.
+# This implementation instead replaces outliers via LINEAR
+# INTERPOLATION between the nearest non-outlier neighbors, preserving
+# a smooth trend through the gap instead of a flat plateau.
+#
+# Measured effect (24 real files): mean large-step rate 19.0% -> 2.4%.
+# Effect on AnchorExtractor confidence is REAL but MODEST, not a full
+# fix -- confidence remains well below the current CONFIDENCE_TRUSTED
+# placeholder even after cleaning. This suggests CONFIDENCE_TRUSTED/
+# CONFIDENCE_SUSPECT are themselves uncalibrated placeholders, separate
+# from the data-quality issue -- run calibrate_thresholds.py against
+# CLEANED output, not raw data, before trusting any threshold values.
+#
+# NOT yet validated against Ethan's attack scenarios -- open question
+# whether cleaning could inadvertently smooth away a genuine injected
+# ENF attack. Test before relying on this in any result that matters.
+# ---------------------------------------------------------------------------
+
+def clean_enf(
+    values: list[float],
+    physical_floor: float = 40.0,
+    physical_ceiling: float = 80.0,
+    hampel_window: int = 11,
+    hampel_n_sigmas: float = 2.0,
+) -> list[float]:
+    """
+    Detects and corrects implausible ENF readings via a two-stage
+    process, replacing all detected outliers by linear interpolation
+    between the nearest non-outlier neighbors (never a flat median --
+    see module comment above for why that matters).
+
+    Stage 1: physical-range check. Any reading outside
+        [physical_floor, physical_ceiling] Hz is marked bad
+        unconditionally -- no real grid frequency is negative or
+        above ~80 Hz, this isn't a judgment call.
+
+    Stage 2: Hampel filter (rolling median + MAD). For each point,
+        compares against the median of a window of hampel_window
+        samples on each side (using only already-known-good points),
+        flags it bad if it deviates more than
+        hampel_n_sigmas * 1.4826 * MAD from that local median.
+
+    Parameters
+    ----------
+    values : list[float]
+        Raw ENF readings from load_enf().
+    physical_floor, physical_ceiling : float
+        Hard sanity bounds in Hz. Default 40-80 Hz is deliberately
+        generous -- only catches readings with no possible physical
+        interpretation, not borderline-plausible ones.
+    hampel_window : int
+        Samples on each side of the point being checked (11 was
+        tuned against 24 real files -- see module comment).
+    hampel_n_sigmas : float
+        Outlier threshold in "sigmas" (MAD-scaled). Lower = more
+        aggressive. 2.0 was chosen as a middle ground between removing
+        more of the large-step pattern (favors ~1.0-1.5) and being
+        conservative about not touching real small-scale variation
+        (favors ~3.0) -- re-validate this choice if the character of
+        future recordings differs from the 24 files this was tuned on.
+
+    Returns
+    -------
+    list[float]
+        Same length as input. Detected-bad points replaced via linear
+        interpolation between nearest good neighbors.
+    """
+    n = len(values)
+    if n == 0:
+        return values
+
+    bad = [v < physical_floor or v > physical_ceiling for v in values]
+
+    k = 1.4826
+    for i in range(n):
+        w_lo = max(0, i - hampel_window)
+        w_hi = min(n, i + hampel_window + 1)
+        window = [values[j] for j in range(w_lo, w_hi) if not bad[j]]
+        if len(window) < 2:
+            continue
+        med = statistics.median(window)
+        mad = statistics.median([abs(v - med) for v in window])
+        threshold = hampel_n_sigmas * k * mad
+        if threshold > 0 and abs(values[i] - med) > threshold:
+            bad[i] = True
+
+    result = list(values)
+    bad_idx = [i for i, b in enumerate(bad) if b]
+    for i in bad_idx:
+        lo = i - 1
+        while lo >= 0 and bad[lo]:
+            lo -= 1
+        hi = i + 1
+        while hi < n and bad[hi]:
+            hi += 1
+        if lo >= 0 and hi < n:
+            frac = (i - lo) / (hi - lo)
+            result[i] = values[lo] + frac * (values[hi] - values[lo])
+        elif lo >= 0:
+            result[i] = values[lo]
+        elif hi < n:
+            result[i] = values[hi]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Combined smoothing -- OPTIONAL, explicit step, added 2026-07. Supersedes
+# clean_enf() for production use (does everything clean_enf() does via
+# hampel_correct() below, PLUS a Butterworth lowpass stage on top) --
+# clean_enf() is kept in this file unchanged for anyone who wants the
+# simpler, lighter-weight version or wants to compare behavior directly.
+#
+# Requires scipy (clean_enf() and everything else in this file is
+# stdlib-only -- this is the one function in data_loaders.py that needs
+# `pip install scipy`).
+#
+# Validated (2026-07) against real ENF data:
+#   - Clean-data confidence: raw ~0.25 mean -> smoothed ~0.97-0.98 mean,
+#     replicated on two independent machines/scipy installs.
+#   - Sustained 20-sample attack: caught reliably (single-window recall
+#     varied 45%-100% across test runs due to minor scipy/floating-point
+#     version differences near a threshold boundary; local CUSUM
+#     detector caught 20/20 on every run).
+#   - Quick-splice sweep (2-44 seconds): local CUSUM caught 100% at every
+#     tested length on every run; single-window thresholding alone
+#     degrades badly on longer durations (as low as 4/22 in one run) --
+#     this is why LocalCUSUMDetector (in verification.py) exists
+#     alongside the confidence check, not as a replacement for it.
+#   - False positives on clean data: 0.00% in every tested run.
+#
+# Same architectural rule as clean_enf(): must be called EXACTLY ONCE,
+# at ingestion, before the file goes anywhere near attack injection.
+# Never call this on a file that may have already been tampered with.
+# ---------------------------------------------------------------------------
+
+def hampel_correct(
+    values: list[float],
+    window: int = 11,
+    n_sigmas: float = 2.0,
+) -> list[float]:
+    """
+    Same mechanism as clean_enf()'s Hampel stage -- detects outliers via
+    rolling median + MAD, replaces via linear interpolation between
+    nearest good neighbors (never a flat median -- see clean_enf()'s
+    docstring for why that matters). Factored out here so combined_smooth()
+    can call it as a distinct stage before the lowpass filter.
+    """
+    n = len(values)
+    if n == 0:
+        return values
+    bad = [False] * n
+    k = 1.4826
+    for i in range(n):
+        lo = max(0, i - window)
+        hi = min(n, i + window + 1)
+        w = [values[j] for j in range(lo, hi) if not bad[j]]
+        if len(w) < 2:
+            continue
+        med = statistics.median(w)
+        mad = statistics.median([abs(v - med) for v in w])
+        threshold = n_sigmas * k * mad
+        if threshold > 0 and abs(values[i] - med) > threshold:
+            bad[i] = True
+
+    result = list(values)
+    bad_idx = [i for i, b in enumerate(bad) if b]
+    for i in bad_idx:
+        lo = i - 1
+        while lo >= 0 and bad[lo]:
+            lo -= 1
+        hi = i + 1
+        while hi < n and bad[hi]:
+            hi += 1
+        if lo >= 0 and hi < n:
+            frac = (i - lo) / (hi - lo)
+            result[i] = values[lo] + frac * (values[hi] - values[lo])
+        elif lo >= 0:
+            result[i] = values[lo]
+        elif hi < n:
+            result[i] = values[hi]
+
+    return result
+
+
+def lowpass_filter_enf(
+    values: list[float],
+    sample_rate_hz: float = 0.5,
+    cutoff_hz: float = 0.02,
+    order: int = 10,
+    nominal: float = 60.0,
+) -> list[float]:
+    """
+    Zero-phase Butterworth lowpass filter applied to the
+    deviation-from-nominal series. Every output point is a weighted
+    combination of real input points -- unlike clean_enf(), nothing is
+    discarded or replaced with guesswork.
+
+    cutoff_hz is the cutoff of the filter APPLIED TO THIS TIME SERIES
+    (how fast the ENF reading is allowed to change) -- NOT the same
+    kind of quantity as clean_enf()'s physical_floor/physical_ceiling
+    (which bound the allowable VALUE range). Different knob, different
+    units, do not confuse the two.
+
+    Uses filtfilt (forward-backward) for zero phase shift -- a
+    forward-only filter would introduce a time lag, which would corrupt
+    AnchorExtractor's window alignment.
+    """
+    from scipy.signal import butter, filtfilt
+
+    nyquist = sample_rate_hz / 2.0
+    normalized_cutoff = min(cutoff_hz / nyquist, 0.99)
+
+    deviation = [v - nominal for v in values]
+    b, a = butter(order, normalized_cutoff, btype="low")
+    smoothed_deviation = filtfilt(b, a, deviation)
+
+    return [d + nominal for d in smoothed_deviation]
+
+
+def combined_smooth(
+    values: list[float],
+    hampel_window: int = 11,
+    hampel_n_sigmas: float = 2.0,
+    lowpass_cutoff_hz: float = 0.02,
+    lowpass_order: int = 10,
+    sample_rate_hz: float = 0.5,
+) -> list[float]:
+    """
+    Stage 1 (hampel_correct, outlier removal) then Stage 2
+    (lowpass_filter_enf, smoothing). This is the recommended, validated
+    ENF cleaning step going forward -- call this from pipeline_test.py
+    in place of clean_enf().
+    """
+    corrected = hampel_correct(values, window=hampel_window, n_sigmas=hampel_n_sigmas)
+    return lowpass_filter_enf(
+        corrected,
+        sample_rate_hz=sample_rate_hz,
+        cutoff_hz=lowpass_cutoff_hz,
+        order=lowpass_order,
+    )
+
+
 # --------------------------------------------------------------------------
 # NLR wattmeter log loaders -- multi-node aware, variable sample rate
 #
@@ -123,8 +391,24 @@ _NLR_MAX_WINDOWS = 1800
 _NLR_DATETIME_FORMAT = "%Y-%m-%d_%H:%M:%S.%f"
 
 # Regex patterns for node ID and SLURM ID extraction
-_NODE_ID_PATTERN_NEW = re.compile(r'node_([^.]+)\.log$', re.IGNORECASE)
-_NODE_ID_PATTERN_OLD = re.compile(r'wattameter_([^.]+)\.log$', re.IGNORECASE)
+#
+# FIXED (2026-07): the old two-pattern approach (_NODE_ID_PATTERN_NEW
+# looking for "node_...", _NODE_ID_PATTERN_OLD looking for
+# "wattameter_...") broke on a real, previously-unseen filename
+# convention: nvml_wattameter_11763012-x3101c0s37b0n0.log (an
+# inference run-number prefix, no "node_" text at all). The OLD
+# pattern still matched (since "wattameter_" is present) but captured
+# "11763012-x3101c0s37b0n0" -- the run number incorrectly included as
+# part of the node ID, silently polluting every downstream column name
+# and component ID.
+#
+# Fixed by matching the actual SHAPE of a node ID directly (xNcNsNbNnN)
+# anywhere in the filename, rather than "whatever text follows a
+# specific prefix". Robust regardless of what precedes it -- tested
+# against every real filename convention seen in this project:
+# training (..._slurmid_N_node_X.log), inference/offline
+# (wattameter_X.log), and inference/online (wattameter_N-X.log).
+_NODE_ID_PATTERN = re.compile(r'(x\d+c\d+s\d+b\d+n\d+)', re.IGNORECASE)
 _SLURM_ID_PATTERN   = re.compile(r'slurmid_(\d+)', re.IGNORECASE)
 
 # Device power limits -- readings above these are hardware errors
@@ -229,24 +513,65 @@ def _nlr_mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+# RAPL energy counters are fixed-width hardware registers: true_total is
+# stored as (true_total % _RAPL_WRAP_CEILING_UJ), so the raw readings
+# periodically drop back near zero even though real energy use only ever
+# increases. A plain modulo can't invert this -- the wrap count itself is
+# lost -- so instead we watch for the characteristic near-ceiling drop and
+# add the ceiling back on every time it happens, exactly the "phase
+# unwrap" trick used for cyclic/angular data. Must run BEFORE aggregation:
+# aggregating (averaging) raw wrapped values blends pre-wrap and post-wrap
+# numbers together whenever a wrap lands mid-window, producing a
+# meaningless window value and a bogus window-to-window "drop" that
+# doesn't match the true wrap size.
+_RAPL_WRAP_CEILING_UJ = 65_500_000_000
+_RAPL_WRAP_TOLERANCE_UJ = 2_000_000_000
+
+
+def _unwrap_uj_series(
+    values: list[float],
+    wrap_ceiling: float = _RAPL_WRAP_CEILING_UJ,
+    wrap_tolerance: float = _RAPL_WRAP_TOLERANCE_UJ,
+) -> list[float]:
+    """
+    Converts a raw RAPL energy counter sequence (periodically wraps back
+    near zero) into a continuous, always-increasing sequence (true
+    cumulative energy). Call this on each channel's full raw sample
+    sequence before aggregating into ENF-aligned windows.
+
+    Detects a wrap whenever a reading drops by roughly wrap_ceiling from
+    the previous raw reading, and from that point on adds
+    (wrap_count * wrap_ceiling) to every subsequent raw value. Handles
+    any number of wraps across the file, in order.
+    """
+    if not values:
+        return values
+
+    unwrapped = [values[0]]
+    wrap_count = 0
+    for i in range(1, len(values)):
+        prev_raw = values[i - 1]
+        curr_raw = values[i]
+        if curr_raw < prev_raw - wrap_tolerance:
+            wrap_count += 1
+        unwrapped.append(curr_raw + wrap_count * wrap_ceiling)
+
+    return unwrapped
+
+
 def _extract_node_id(filename: str) -> Optional[str]:
     """
-    Extracts the node identifier from a wattmeter log filename.
-
-    Handles two naming conventions:
-      New: nvml_wattameter_emissions_parsed_slurmid_10742842_node_x3105c0s41b0n0.log
-             -> "x3105c0s41b0n0"
-      Old: nvml_wattameter_x3115c0s33b0n0.log
-             -> "x3115c0s33b0n0"
+    Extracts the node identifier from a wattmeter log filename by
+    matching its actual shape (xNcNsNbNnN) directly, rather than
+    relying on what text happens to precede it. Handles every real
+    naming convention seen in this project:
+      Training:            ..._slurmid_10742842_node_x3105c0s41b0n0.log
+      Inference (offline):  nvml_wattameter_x3115c0s33b0n0.log
+      Inference (online):   nvml_wattameter_11763012-x3101c0s37b0n0.log
     """
     name = Path(filename).name
-    m = _NODE_ID_PATTERN_NEW.search(name)
-    if m:
-        return m.group(1)
-    m = _NODE_ID_PATTERN_OLD.search(name)
-    if m:
-        return m.group(1)
-    return None
+    m = _NODE_ID_PATTERN.search(name)
+    return m.group(1) if m else None
 
 
 def _detect_sample_rate_hz(path: str, n_samples: int = 30) -> float:
@@ -520,6 +845,21 @@ def _parse_rapl_log(
                 cpu0_w=cpu0_w,             cpu0_core_w=cpu0_core_w,
                 cpu1_w=cpu1_w,             cpu1_core_w=cpu1_core_w,
             ))
+
+    # Unwrap each uJ channel's full raw sequence BEFORE any aggregation
+    # happens. Must be done here, not in _aggregate_cpu, so averaging
+    # never sees a wrapped value in the first place.
+    if rows:
+        unwrapped_cpu0_uj      = _unwrap_uj_series([r.cpu0_uj      for r in rows])
+        unwrapped_cpu0_core_uj = _unwrap_uj_series([r.cpu0_core_uj for r in rows])
+        unwrapped_cpu1_uj      = _unwrap_uj_series([r.cpu1_uj      for r in rows])
+        unwrapped_cpu1_core_uj = _unwrap_uj_series([r.cpu1_core_uj for r in rows])
+        for i, r in enumerate(rows):
+            r.cpu0_uj      = unwrapped_cpu0_uj[i]
+            r.cpu0_core_uj = unwrapped_cpu0_core_uj[i]
+            r.cpu1_uj      = unwrapped_cpu1_uj[i]
+            r.cpu1_core_uj = unwrapped_cpu1_core_uj[i]
+
     return rows
 
 
@@ -581,7 +921,7 @@ def load_nlr_multi(
     Auto-detects the NLR sample rate from the first file so the correct
     number of raw samples are averaged per ENF-aligned window:
         training workloads  ->  5 Hz ->  10 samples per window
-        inference workloads -> 10 Hz ->  20 samples per window
+        inference workloads -> 10 Hz -> 20 samples per window
 
     Parameters
     ----------

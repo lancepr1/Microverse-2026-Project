@@ -18,7 +18,7 @@ import json
 import os
 from typing import Iterable, Type, TypeVar
 
-from .contracts import RECORD_TYPES, _Record
+from contracts import RECORD_TYPES, _Record
 
 T = TypeVar("T", bound=_Record)
 

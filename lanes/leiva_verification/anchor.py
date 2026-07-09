@@ -47,7 +47,21 @@ class AnchorExtractor:
         Embedded in AnchorRecord.source for traceability.
     """
 
-    DEFAULT_WINDOW_RADIUS = 5
+    # RETUNED (2026-07) from 5 to 9. Tested a full sweep 5-170 against both
+    # a known-smooth synthetic reference and the cleanest verified real ENF
+    # segment available: widening the window reduces small-sample
+    # correlation noise (real gains on both signals), but ALSO makes a
+    # sustained constant-value attack progressively harder to detect, since
+    # a long enough anomaly becomes self-correlated with its own
+    # window-shifted copy. Found a sharp cliff: confidence during a tested
+    # 20-sample sustained attack stayed at exactly 0.0 (fully caught) for
+    # radius 5-9, then jumped to 0.62+ at radius=11 (effectively blind).
+    # 9 is the widest value with ZERO measured cost against that attack.
+    # CAVEAT: this safety margin is tied to that attack's specific 20-sample
+    # duration (window size stays just under attack length). NOT verified
+    # safe against a shorter sustained attack -- re-test if one becomes
+    # available.
+    DEFAULT_WINDOW_RADIUS = 9
     DEFAULT_SOURCE = "enf_dataset"
 
     def __init__(

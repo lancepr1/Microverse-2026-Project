@@ -141,8 +141,16 @@ def main():
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
     confidence_values = []
 
+    # FIXED (2026-07): was ts = float(record["index"]), which passes the raw
+    # record index directly as if it were already in seconds. AnchorExtractor
+    # expects real elapsed seconds (its own docstring: "t=2.0 -> index 1" at
+    # 0.5 Hz) -- passing raw index silently caused int(timestamp *
+    # sample_rate_hz) to under-advance, visiting each real window twice and
+    # never reaching roughly the back half of the file as a window center at
+    # all. Same bug found and fixed in verify_file.py -- every threshold
+    # calibrated before this fix was computed against the wrong windowing.
     for i, record in enumerate(records):
-        ts = float(record["index"])
+        ts = float(record["index"]) / 0.5
         anchor = extractor.extract(ts)
         confidence_values.append(anchor.confidence)
 

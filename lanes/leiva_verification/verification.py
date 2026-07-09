@@ -38,6 +38,22 @@ information along -- not to gate whether data keeps moving.
     if BOTH a range and a step-size problem hit the same channel in the
     same window, they merge into one result naming both.
 
+   11. Cross-node corroboration (_apply_synchronized_event_correlation)
+                               NEW -- runs after all NLR checks merge.
+                               A pure step-size (discontinuity) failure
+                               is downgraded from FAILED to SUSPECT when
+                               enough OTHER independent nodes show the
+                               same step on the same physical channel in
+                               the same window -- real synchronized
+                               system events (checkpoints, gradient-sync
+                               barriers, job startup) produce exactly
+                               this signature, and an attacker targeting
+                               one node cannot fake agreement from many
+                               other real nodes. Never downgrades a
+                               channel that is ALSO out of range or
+                               violating monotonicity -- corroboration
+                               only softens pure step-size calls.
+
 Status mapping (per metrics.py -- only FAILED counts as a detection):
   TRUSTED  passes cleanly (dashboard-facing label: "good")
   SUSPECT  ENF confidence in the soft zone, no hard check failed
@@ -76,8 +92,8 @@ from microverse_core.contracts import (
 # and paste the output here.
 # ---------------------------------------------------------------------------
 
-CONFIDENCE_TRUSTED = 0.70
-CONFIDENCE_SUSPECT = 0.50
+CONFIDENCE_TRUSTED = 0.93  # RECALIBRATED (2026-07) for combined_smooth() output (was 0.25, calibrated against the older clean_enf() pipeline with mean confidence ~0.25). combined_smooth()'s mean/median confidence on real cleaned data is ~0.97-0.98; P10 of that distribution was measured at 0.9392. Old value would provide near-zero discrimination against the new, much tighter baseline.
+CONFIDENCE_SUSPECT = 0.85  # RECALIBRATED (2026-07) for combined_smooth() output (was -0.55). Matches the single_window_threshold validated in test_combined_smoothing.py -- comfortably below the measured P1 of clean data (0.9215), catches the sustained attack and (with LocalCUSUMDetector below) the quick-splice sweep. Re-verify against real ground-truth attack data before treating as final, same caveat as the value it replaces.
 
 # Raw frequency plausibility -- checked BEFORE normalization since
 # normalization absorbs extreme values into the signature shape.
@@ -86,8 +102,37 @@ NOMINAL_HZ = 60.0
 NOMINAL_TOLERANCE_HZ = 2.0
 
 CUSUM_THRESHOLD  = 5.0
-CUSUM_BASELINE   = 0.30
+CUSUM_BASELINE   = 0.03  # RECALIBRATED (2026-07) for combined_smooth() output (was 0.30). Mean(1-confidence) on real smoothed clean data measured 0.0216-0.0320 across two independent test runs. Note: _DriftMonitor self-calibrates from real history via calibrate() after warmup_windows, so this static value mainly matters during the warmup period -- still updated to avoid a wildly mismatched default.
 CUSUM_HISTORY    = 60
+
+# Local CUSUM detector -- separate from _DriftMonitor above, which
+# accumulates over an ENTIRE file's history and reacts too slowly to a
+# short, localized attack. This one accumulates over a SHORT sliding
+# window specifically to catch the "several nearby windows each show a
+# partial confidence dip, none alone crosses CONFIDENCE_SUSPECT" pattern
+# found in quick-splice testing (2026-07): single-window thresholding
+# alone caught as few as 4/22 windows on a 44-second splice; this
+# detector caught 22/22 on every tested run, 2-44 seconds, with 0.00%
+# false positives on clean data. See combined_smoothing.py test suite.
+LOCAL_CUSUM_WINDOW_SIZE = 10
+LOCAL_CUSUM_THRESHOLD   = 2.0
+
+# Raw-value drift check -- added 2026-07 to close a validated gap: a
+# slow, smooth ramp attack (each step tiny, cumulative drift large)
+# doesn't disrupt window-to-window CONFIDENCE early on, so every
+# confidence-based check above (DISCONTINUITY, LOCAL ANOMALY, DRIFT
+# DETECTED -- which despite its name tracks confidence drift, not
+# value drift) stayed blind until the cumulative drift crossed the
+# fixed NOMINAL_TOLERANCE_HZ absolute threshold. Tested against a real
+# 90-window ground-truth ramp attack: existing checks alone caught
+# 49/90 (54%); this check alone caught 71/90 (79%), fully overlapping
+# and extending the existing coverage. Residual gap (first ~19 windows
+# of the ramp) is expected detection latency -- any window-based trend
+# check needs some minimum history to distinguish a real ramp from
+# noise. Calibrated against real cleaned data: threshold=0.6 gives
+# 0.33% FPR alone, 0.78% combined with everything else.
+RAW_DRIFT_WINDOW_SIZE = 30
+RAW_DRIFT_THRESHOLD = 0.6
 
 # ---------------------------------------------------------------------------
 # Tunable thresholds -- NLR side
@@ -114,15 +159,27 @@ CPU_UJ_WRAP_TOLERANCE =  2_000_000_000
 
 GPU_TEMP_FLOOR_C    = 0.0    # a GPU under any load at/below 0C is a stuck/fabricated sensor
 GPU_TEMP_CEILING_C  = 95.0   # datacenter GPUs throttle/shutdown in the 83-95C range
-GPU_TEMP_MAX_STEP_C = 15.0   # placeholder max plausible swing per ENF window
+GPU_TEMP_MAX_STEP_C = 8.0    # RECALIBRATED (2026-07) from the original 15.0 placeholder, which was never once crossed across 14,400 real step observations (max observed real step was 13.80C) -- meaning it provided no real detection power at all, only ever tested as "never fires." 8.0 sits comfortably above the real P99 (5.10C). Matches the same pattern already found for CPU_MAX_STEP_W: 91.4% of what this threshold catches (32/35 exceedances) falls in the first 150 windows -- the known, already-documented startup-ramp period, not a new phenomenon. Only 3 genuine steady-state exceedances remain across ~1650 windows. Calibrated against exactly one real file (run_2node.jsonl) -- revisit if a second real file shows meaningfully different behavior.
 
 # Derived (not arbitrary): CPU_POWER_CEILING_W for one ENF window,
 # converted to uJ, with a 1.5x safety margin.
 _ENF_WINDOW_SECONDS = 2.0
 CPU_UJ_MAX_STEP_UJ = CPU_POWER_CEILING_W * _ENF_WINDOW_SECONDS * 1_000_000 * 1.5
 
+# ---------------------------------------------------------------------------
+# PLACEHOLDER thresholds -- cross-node corroboration for step-size
+# (continuity) failures. NOT yet validated against Ethan's coordinated
+# multi-node attack scenarios -- see _apply_synchronized_event_correlation.
+# ---------------------------------------------------------------------------
+
+SYNC_EVENT_MIN_NODES    = 4     # CEILING on the absolute-node requirement --
+                                 # scales DOWN for smaller deployments, see
+                                 # _apply_synchronized_event_correlation
+SYNC_EVENT_MIN_FRACTION = 0.5   # AND must be at least this fraction of nodes present
+
 # Score values
 SCORE_TRUSTED      = 0.95
+SCORE_SUSPECT       = 0.50
 SCORE_FAILED_HARD  = 0.05
 SCORE_FAILED_DRIFT = 0.10
 
@@ -290,6 +347,10 @@ class _DriftMonitor:
         return self._cusum
 
     @property
+    def baseline(self) -> float:
+        return self._baseline
+
+    @property
     def sample_count(self) -> int:
         return self._n
 
@@ -312,6 +373,93 @@ class _DriftMonitor:
         self._cusum = 0.0
 
 
+class _LocalCUSUMDetector:
+    """
+    Added 2026-07, alongside combined_smooth() in data_loaders.py.
+
+    Accumulates (1 - confidence) over a SHORT sliding window (unlike
+    _DriftMonitor above, which accumulates over the entire file's
+    history and is tuned for slow, genuine long-term drift). This one
+    is tuned for short, localized anomalies -- specifically the
+    "several nearby windows each show a partial confidence dip, none
+    alone crosses CONFIDENCE_SUSPECT" pattern found during quick-splice
+    testing, where single-window thresholding degraded badly on longer
+    (but still well under a minute) sustained anomalies.
+
+    RECOVERY MECHANISM (added 2026-07, second pass): tested against a
+    real ground-truth attack (10 genuine windows) and found the slow
+    linear decay alone left this detector firing FAILED for roughly
+    120 additional windows (~4 minutes) after DISCONTINUITY had already
+    cleared and the underlying confidence had genuinely recovered --
+    the cusum simply climbed too high during the attack to decay back
+    under threshold quickly at the baseline-sized decay step. Fixed by
+    tracking consecutive windows with confidence back above
+    recovery_threshold; after recovery_windows in a row, force a full
+    reset instead of waiting on the slow linear decay.
+
+    recovery_windows=20 (not the originally-tried 5) was chosen after
+    finding a real tradeoff: a SHORT recovery_windows can trigger a
+    premature reset if a longer attack has a brief internal "quiet
+    patch" where confidence genuinely recovers for a few windows before
+    the attack continues (measured directly: a 22-sample splice attack
+    has exactly this shape, confidence hitting 0.97+ for 5 straight
+    windows midway through, well before the attack actually ends) --
+    at recovery_windows=5 this cut splice recall from 22/22 to 8/22.
+    recovery_windows=20 was swept and confirmed to fully restore that
+    recall while still keeping the real-attack recovery tail far
+    shorter than no fast-recovery at all (measured: ~28 windows vs the
+    original ~120).
+    """
+
+    def __init__(
+        self,
+        window_size: int = LOCAL_CUSUM_WINDOW_SIZE,
+        baseline: float = CUSUM_BASELINE,
+        cusum_threshold: float = LOCAL_CUSUM_THRESHOLD,
+        recovery_threshold: float = CONFIDENCE_SUSPECT,
+        recovery_windows: int = 20,
+    ):
+        self._window_size = window_size
+        self._baseline = baseline
+        self._cusum_threshold = cusum_threshold
+        self._recovery_threshold = recovery_threshold
+        self._recovery_windows = recovery_windows
+        self._history: collections.deque = collections.deque(maxlen=window_size)
+        self._cusum: float = 0.0
+        self._consecutive_good: int = 0
+
+    @property
+    def cusum(self) -> float:
+        return self._cusum
+
+    def record(self, confidence: float) -> bool:
+        """Records one confidence value, returns True if flagged."""
+        deviation = 1.0 - confidence
+        self._history.append(deviation)
+        self._cusum = max(0.0, self._cusum + (deviation - self._baseline))
+        if len(self._history) == self._window_size and deviation < self._baseline:
+            self._cusum = max(0.0, self._cusum - self._baseline)
+
+        if confidence >= self._recovery_threshold:
+            self._consecutive_good += 1
+            if self._consecutive_good >= self._recovery_windows:
+                self._cusum = 0.0
+        else:
+            self._consecutive_good = 0
+
+        return self._cusum > self._cusum_threshold
+
+    def calibrate(self, baseline: float) -> None:
+        """Allows the same runtime-calibrated baseline _DriftMonitor uses to be shared here."""
+        self._baseline = baseline
+        self._cusum = 0.0
+        self._consecutive_good = 0
+
+    def reset(self) -> None:
+        self._cusum = 0.0
+        self._consecutive_good = 0
+
+
 # ---------------------------------------------------------------------------
 # Internal check classes -- NLR side (multi-node aware)
 #
@@ -323,6 +471,53 @@ class _DriftMonitor:
 
 _TRUSTED = VerificationStatus.TRUSTED.value
 _FAILED  = VerificationStatus.FAILED.value
+
+
+class _RawDriftCheck:
+    """
+    Detects sustained directional drift in the RAW ENF value, completely
+    independent of confidence -- see module comment above
+    RAW_DRIFT_WINDOW_SIZE for the gap this closes and why it's needed.
+
+    Splits a rolling window of raw values into two halves and compares
+    their means. A real random walk around a stable nominal frequency
+    should show a roughly-zero difference between an early and late
+    half of any given window; a sustained directional ramp (the attack
+    type this targets) produces a clear, growing difference instead.
+
+    Deliberately simple (not a proper linear regression) -- tested
+    directly against real clean data and a real ground-truth ramp
+    attack, and a full regression fit wasn't needed to get a working,
+    well-calibrated result.
+    """
+
+    def __init__(
+        self,
+        window_size: int = RAW_DRIFT_WINDOW_SIZE,
+        drift_threshold: float = RAW_DRIFT_THRESHOLD,
+    ):
+        self._window_size = window_size
+        self._drift_threshold = drift_threshold
+        self._history: collections.deque = collections.deque(maxlen=window_size)
+
+    def check(self, raw_freq: float) -> tuple[bool, str]:
+        self._history.append(raw_freq)
+        if len(self._history) < self._window_size:
+            return True, "ok"
+        half = self._window_size // 2
+        window = list(self._history)
+        first_half_mean = statistics.mean(window[:half])
+        second_half_mean = statistics.mean(window[half:])
+        trend = second_half_mean - first_half_mean
+        if abs(trend) > self._drift_threshold:
+            return False, (
+                f"RAW VALUE TREND: sustained {trend:+.4f} Hz drift within "
+                f"a {self._window_size}-window span (early-half mean "
+                f"{first_half_mean:.4f}, late-half mean {second_half_mean:.4f}) "
+                f"-- real ENF doesn't sustain a directional trend this "
+                f"large this consistently"
+            )
+        return True, "ok"
 
 
 class _NLRRangeCheck:
@@ -565,6 +760,122 @@ def _merge_key_results(*result_dicts: dict[str, tuple[str, str]]) -> dict[str, t
     return merged
 
 
+def _bare_channel_name(key: str) -> str:
+    """
+    Strips the node-id prefix from a full column name, returning just
+    the physical channel -- e.g. "x3105c0s37b0n0_cpu-0[W]" -> "cpu-0[W]".
+    Used to group the SAME physical channel across DIFFERENT nodes so
+    cross-node corroboration can be checked.
+    """
+    for marker in ("_gpu-", "_cpu-"):
+        idx = key.find(marker)
+        if idx != -1:
+            return key[idx + 1:]
+    return key
+
+
+def _is_pure_discontinuity(reason: str) -> bool:
+    """
+    True only if DISCONTINUITY is the SOLE problem on this channel.
+    A channel that is ALSO out of range, rolling back, or energy-
+    spiking is never eligible for corroboration downgrade below --
+    those are absolute plausibility violations, independent of
+    whatever every other node happens to be doing.
+    """
+    if "DISCONTINUITY" not in reason:
+        return False
+    disqualifying = ("OUT OF RANGE", "MONOTONICITY VIOLATION", "ENERGY SPIKE")
+    return not any(d in reason for d in disqualifying)
+
+
+def _apply_synchronized_event_correlation(
+    merged: dict[str, tuple[str, str]],
+    max_min_nodes: int = SYNC_EVENT_MIN_NODES,
+    min_fraction: float = SYNC_EVENT_MIN_FRACTION,
+) -> dict[str, tuple[str, str]]:
+    """
+    Cross-node corroboration for step-size (continuity) failures.
+
+    Independent hardware does not coincidentally step together. If a
+    large, otherwise-implausible step shows up on the SAME physical
+    channel (e.g. cpu-0[W]) on many DIFFERENT nodes in the SAME
+    window, that is itself strong evidence of a real synchronized
+    system event -- a checkpoint save, a gradient-sync barrier, job
+    startup -- rather than tampering. An attacker targeting one node
+    cannot make many other independent nodes' real telemetry jump in
+    lockstep too, so requiring corroboration doesn't weaken detection
+    of an actual single-node attack -- it only softens the call on
+    events that many nodes agree on simultaneously.
+
+    Only PURE discontinuity failures are eligible (see
+    _is_pure_discontinuity) -- corroboration never rescues a channel
+    that is also out of range or violating monotonicity.
+
+    The absolute-node requirement SCALES with how many nodes actually
+    have this channel present this window, rather than being a fixed
+    number:
+
+        effective_min_nodes = max(2, min(max_min_nodes, total_nodes))
+
+    At or above max_min_nodes total nodes (e.g. a 16-node rack), this
+    is identical to the fixed floor before -- nothing changes for a
+    full deployment. Below that, it scales down so a small deployment
+    (e.g. 2 nodes) can still corroborate off full unanimous agreement,
+    instead of a fixed floor that's mathematically unreachable with
+    that few nodes. Never drops below 2 -- a single node's own reading
+    cannot "corroborate" itself, so a 1-node deployment can never
+    trigger this regardless of max_min_nodes.
+
+    This is a real security tradeoff, not a free improvement: on a
+    small deployment, an attacker who has compromised ALL of that
+    deployment's nodes could coordinate tampering to mimic this exact
+    signature and get downgraded to SUSPECT. The smaller the
+    deployment, the smaller the number of nodes an attacker needs to
+    compromise to fake corroboration. Still requires BOTH the scaled
+    node count AND min_fraction (share of nodes present) to downgrade.
+
+    Downgrades matching entries from FAILED to SUSPECT (not TRUSTED --
+    this is still worth watching, just not a confident hard failure)
+    and appends a note naming exactly how many nodes corroborated it.
+    """
+    by_channel: dict[str, list[str]] = collections.defaultdict(list)
+    for key in merged:
+        by_channel[_bare_channel_name(key)].append(key)
+
+    result = dict(merged)
+
+    for bare, keys in by_channel.items():
+        total_nodes = len(keys)
+        failed_keys = [
+            k for k in keys
+            if merged[k][0] == _FAILED and _is_pure_discontinuity(merged[k][1])
+        ]
+        if not failed_keys:
+            continue
+
+        count = len(failed_keys)
+        fraction = count / total_nodes if total_nodes else 0.0
+        effective_min_nodes = max(2, min(max_min_nodes, total_nodes))
+
+        if count >= effective_min_nodes and fraction >= min_fraction:
+            for k in failed_keys:
+                orig_status, orig_reason = merged[k]
+                result[k] = (
+                    VerificationStatus.SUSPECT.value,
+                    f"{orig_reason} | SYNCHRONIZED EVENT: corroborated by "
+                    f"{count}/{total_nodes} nodes stepping on {bare} in the "
+                    f"same window (required >={effective_min_nodes} of "
+                    f"{total_nodes} present) -- likely a real system-wide "
+                    f"event (checkpoint/sync/startup), not tampering "
+                    f"(PLACEHOLDER thresholds, not yet validated against "
+                    f"coordinated multi-node attack scenarios)"
+                )
+
+    return result
+
+
+
+
 # ---------------------------------------------------------------------------
 # Public Verifier
 # ---------------------------------------------------------------------------
@@ -611,6 +922,8 @@ class Verifier:
         self._range_check         = _ENFRangeCheck()
         self._continuity_check    = _ENFContinuityCheck()
         self._drift_monitor       = _DriftMonitor()
+        self._local_cusum         = _LocalCUSUMDetector()
+        self._raw_drift_check     = _RawDriftCheck()
 
         # NLR checks -- multi-node aware, no configuration needed
         self._nlr_range_check        = _NLRRangeCheck()
@@ -677,6 +990,15 @@ class Verifier:
                 enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
                 enf_reasons.append(reason)
 
+            # Independent of confidence entirely -- see _RawDriftCheck
+            # docstring for the gap this specifically closes (slow ramp
+            # attacks that don't disrupt window-to-window correlation
+            # early on).
+            passed, reason = self._raw_drift_check.check(raw_freq)
+            if not passed:
+                enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+                enf_reasons.append(reason)
+
         passed, reason = self._range_check.check(anchor.signature)
         if not passed:
             enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
@@ -693,6 +1015,15 @@ class Verifier:
         self._windows_processed += 1
         if self._windows_processed == self._warmup_windows:
             self._drift_monitor.calibrate()
+            # NOTE: deliberately NOT sharing this calibration with
+            # _local_cusum. Tested (2026-07): a 10-window sample produced
+            # a baseline of 0.00273, ~8x tighter than the true whole-file
+            # baseline (0.02163) -- fine for _drift_monitor (threshold=5.0
+            # has enough buffer to absorb it) but caused _local_cusum
+            # (threshold=2.0, much less forgiving) to false-positive on
+            # 89.83% of completely clean data. _local_cusum keeps using
+            # its well-calibrated static default (CUSUM_BASELINE, measured
+            # directly from real whole-file data) instead.
 
         if self._drift_monitor.is_drifting():
             enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
@@ -702,6 +1033,28 @@ class Verifier:
                 f"over {self._drift_monitor.sample_count} windows"
             )
             self._drift_monitor.reset()
+
+        # Local CUSUM -- short-horizon, catches localized anomalies
+        # (quick splices, short sustained fabrications) that individual
+        # windows don't always cross CONFIDENCE_SUSPECT for on their own.
+        # See _LocalCUSUMDetector docstring.
+        #
+        # IMPORTANT: deliberately does NOT reset() on every firing (unlike
+        # _drift_monitor above). Testing found that resetting immediately
+        # after each detection made this re-accumulate from zero every
+        # time, causing it to miss most of a longer anomaly's duration
+        # (dropped back to matching single-window-only performance, e.g.
+        # 4/22 on a 44-second splice instead of the validated 22/22).
+        # Letting it stay latched until enough good data naturally decays
+        # it back down is the behavior that was actually tested and
+        # validated in combined_smoothing.py's test suite.
+        if self._local_cusum.record(anchor.confidence):
+            enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+            enf_reasons.append(
+                f"LOCAL ANOMALY: CUSUM={self._local_cusum.cusum:.3f} "
+                f"exceeded threshold={LOCAL_CUSUM_THRESHOLD} "
+                f"within a {LOCAL_CUSUM_WINDOW_SIZE}-window span"
+            )
 
         # Soft confidence tier only applies if nothing hard already failed
         if enf_status == VerificationStatus.TRUSTED.value and anchor.confidence < CONFIDENCE_TRUSTED:
@@ -744,8 +1097,21 @@ class Verifier:
                 self._gpu_temp_continuity_check.check(record_dict),
             )
 
+            # Cross-node corroboration: downgrades a step-size failure
+            # from FAILED to SUSPECT only when enough OTHER independent
+            # nodes show the same pattern in this same window -- see
+            # _apply_synchronized_event_correlation for why this is
+            # safe (an attacker on one node can't fake agreement from
+            # many other real nodes).
+            merged = _apply_synchronized_event_correlation(merged)
+
             for key, (status, reason) in merged.items():
-                score = SCORE_TRUSTED if status == VerificationStatus.TRUSTED.value else SCORE_FAILED_HARD
+                if status == VerificationStatus.TRUSTED.value:
+                    score = SCORE_TRUSTED
+                elif status == VerificationStatus.SUSPECT.value:
+                    score = SCORE_SUSPECT
+                else:
+                    score = SCORE_FAILED_HARD
                 results.append(VerificationResult(
                     timestamp=ts,
                     component_id=f"{self._component_id}/{key}",
