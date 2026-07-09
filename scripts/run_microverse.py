@@ -294,83 +294,77 @@ def stage_1_ingest_and_smooth(args) -> Path:
     records = build_combined_records(enf, node_windows)
 
     # Named after the actual node folder the user selected (e.g.
-    # "4node.jsonl", "1node.jsonl") -- traceable to the real choice
-    # made in gather_inputs(), rather than a hardcoded guess.
+    # "run_4node.jsonl", "run_1node.jsonl") -- traceable to the real
+    # choice made in gather_inputs(), rather than a hardcoded guess.
     #
-    # NOTE: attack.py is currently only confirmed to read a file
-    # literally named "2node.jsonl" (as of 2026-07, still being
-    # actively developed on Ethan's side -- eventually it'll take
-    # whatever file is present in data/combined instead of a fixed
-    # name). If a NON-2node dataset was selected, this file's name
-    # won't match what attack.py currently looks for -- the warning
-    # below fires in that case so it's visible, not silent.
-    out_filename = getattr(args, "node_folder_name", None) or "2node"
+    # CONFIRMED 2026-07 from reading attack.py's actual source: it
+    # constructs exactly f"run_{args.nodes}node.jsonl", where
+    # args.nodes comes from its own --nodes CLI argument (default 2).
+    # stage_2 passes --nodes matching this exact filename, so any
+    # node count works correctly now -- no longer limited to 2-node
+    # runs the way earlier versions of this pipeline assumed.
+    out_filename = f"run_{getattr(args, 'node_folder_name', None) or '2node'}"
     out_path = Path(args.output_dir) / f"{out_filename}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_combined_jsonl(records, str(out_path))
     print(f"[1/4] Wrote {len(records)} records -> {out_path}")
-    if out_filename != "2node":
-        print(f"[1/4] WARNING: wrote '{out_filename}.jsonl', but attack.py is "
-              f"currently only confirmed to read a fixed 'data/combined/2node.jsonl' "
-              f"regardless of what was actually selected -- this run's file "
-              f"may not be found by attack.py until that's generalized on its side.")
     return out_path
 
 
 def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     """
-    Confirmed 2026-07: attack.py is invoked with no CLI arguments at
-    all -- `python lanes/marchisano_attacks/attack.py`.
+    Confirmed 2026-07 from reading attack.py's actual source:
 
-    INPUT: currently reads a hardcoded data/combined/2node.jsonl.
-    STILL BEING ACTIVELY DEVELOPED on the attack.py side -- eventually
-    it will take whatever file is present in data/combined/ instead of
-    a fixed name. stage_1 writing to "2node.jsonl" specifically is a
-    provisional assumption tied to attack.py's CURRENT behavior, not
-    a stable contract -- revisit this once that change lands.
+    INPUT: takes a real CLI argument, --nodes N (default 2), used to
+    construct exactly f"run_{N}node.jsonl" in data/combined/. This
+    generalizes cleanly -- no more "only works for 2-node runs"
+    limitation. Passed here as whatever node count was actually
+    selected in gather_inputs(), kept in sync with stage_1's output
+    filename since both derive from the same node_folder_name.
 
-    OUTPUT: written to lanes/marchisano_attacks/outputs/, filename
-    varies by which attack type got selected (e.g.
-    attack_203_check.jsonl) -- NOT predictable in advance, so this
-    can't just be a hardcoded path the way input is. Found instead by
-    snapshotting the output directory before running attack.py, then
-    diffing after, and picking whatever new file appeared.
+    OUTPUT: writes TWO files per run to lanes/marchisano_attacks/outputs/:
+    attack_{id}.jsonl (no ground truth) AND attack_{id}_check.jsonl
+    (same data, plus a 0/1 "attack" ground-truth column). {id} varies
+    by which scenario got selected (interactively, or randomly for
+    medium/hard preset scenarios) -- genuinely unpredictable in
+    advance, so still found via before/after directory diffing.
 
-    NOTE the "_check" suffix pattern matches the ground-truth-labeled
-    files used throughout this project's testing (an "attack" column
-    with 0/1 labels). If that column is present in what attack.py
-    outputs, it will pass through untouched into anchor_verified.jsonl
-    at stage 3 -- Verifier only reads known field names (FRQ, node-
-    prefixed channels, index) and ignores anything else, so this is
-    harmless functionally, and arguably useful for the scoreboard
-    (ground truth sitting right next to our verdict in the same file).
-    BUT confirm with whoever owns the scoreboard whether they want
-    that ground-truth column present in what they receive, or want it
-    stripped first -- not something to decide silently either way.
+    IMPORTANT FIX: must specifically glob "attack_*_check.jsonl", not
+    the broader "attack_*.jsonl" -- the broad pattern matches BOTH
+    files written each run, which would incorrectly trigger the
+    "multiple new files" ambiguity path on every single run. The
+    _check version is deliberately the one used here (not the plain
+    version) -- it carries ground truth alongside our verdict, which
+    is genuinely useful for the scoreboard, though worth confirming
+    with whoever owns it whether they want that ground-truth column
+    visible or stripped before it reaches them.
     """
     import subprocess
 
     output_dir = _REPO_ROOT / "lanes" / "marchisano_attacks" / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
-    before = set(output_dir.glob("attack_*.jsonl"))
+    before = set(output_dir.glob("attack_*_check.jsonl"))
 
-    print(f"[2/4] Launching attack.py (reads {clean_path} implicitly, no args passed) ...")
+    node_count = _node_sort_key(getattr(args, "node_folder_name", None) or "2node")
+
+    print(f"[2/4] Launching attack.py --nodes {node_count} "
+          f"(reads {clean_path}) ...")
     print(f"[2/4] attack.py has its own interactive prompts -- answer those directly below.\n")
     subprocess.run(
-        ["python", "lanes/marchisano_attacks/attack.py"],
+        ["python", "lanes/marchisano_attacks/attack.py", "--nodes", str(node_count)],
         check=True,
         cwd=str(_REPO_ROOT),  # ensures attack.py's own relative paths resolve
                                # correctly regardless of where run_microverse.py
                                # itself was invoked from
     )
 
-    after = set(output_dir.glob("attack_*.jsonl"))
+    after = set(output_dir.glob("attack_*_check.jsonl"))
     new_files = after - before
 
     if not new_files:
         raise FileNotFoundError(
-            f"attack.py ran, but no new attack_*.jsonl file appeared in "
-            f"{output_dir}. Its output filename varies by attack type and "
+            f"attack.py ran, but no new attack_*_check.jsonl file appeared in "
+            f"{output_dir}. Its output filename varies by scenario and "
             f"couldn't be found automatically this way -- check attack.py's "
             f"actual current behavior."
         )
