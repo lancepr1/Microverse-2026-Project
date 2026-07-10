@@ -13,7 +13,7 @@ Node-card/rack-card border colors and the detail panel's status badge are
 driven by Leiva's real-time verification status (good/suspect/warning),
 the only live per-node state signal that exists in this repo today. The
 node card's "forecast" badge reuses that same status as an interim stand-in
-(good->Nominal, suspect->Warning, warning->Alert) -- there is no RNN
+(good->Normal, suspect->Warning, warning->Alert) -- there is no RNN
 forecast model in this repo, so no "Breach ~Xs" countdown is fabricated.
 The detail panel's 30-Second Forecast, Weakpoint RNN, and AI Explanation
 sections are all labeled placeholders for the same reason: none of that
@@ -29,6 +29,13 @@ the grid. Instead, each node/rack card's changing bits (power, temp,
 badge, border color) have their own ids and are updated in place via
 MATCH-pattern callbacks below, so the buttons themselves -- and their
 client-side n_clicks/selection state -- are never touched by a data tick.
+
+The same "never rebuild" rule applies to the two viewing controls below
+(node-status filter chips, rack-focus toggle): both work by dimming
+already-mounted cards via their existing style Outputs (opacity), never by
+adding/removing grid children -- so filtering/focusing never disturbs
+selection state or grid geometry, and an operator's spatial memory of
+"node07 is bottom-left of Rack 2" stays valid no matter what's filtered.
 """
 from dash import html, dcc, callback, Input, Output, State, ALL, MATCH, ctx, no_update
 
@@ -36,20 +43,27 @@ from data_feed import list_node_ids, poll_all, node_display_label
 
 RACK_SIZE = 4
 
+# (status value in poll state, chip label) -- "all" always first/default.
+NODE_STATUS_FILTERS = [
+    ("all", "All"), ("good", "Normal"), ("suspect", "Warning"), ("warning", "Alert"),
+]
+
 COLOR_TEXT    = "#0f172a"
 COLOR_LABEL   = "#64748b"
 COLOR_DEFAULT = "#e2e8f0"
 COLOR_NOMINAL = "#16a34a"
-COLOR_WARNING = "#d97706"
+COLOR_WARNING = "#ca8a04"
 COLOR_ALERT   = "#dc2626"
 
-_STATUS_TO_LABEL  = {"good": "Nominal", "suspect": "Warning", "warning": "Alert"}
+_STATUS_TO_LABEL  = {"good": "Normal", "suspect": "Warning", "warning": "Alert"}
 _STATUS_TO_BADGE  = {"good": "NOM", "suspect": "WRN", "warning": "ALR"}
 _STATUS_TO_BORDER = {"good": COLOR_NOMINAL, "suspect": COLOR_WARNING, "warning": COLOR_ALERT}
 _STATUS_RANK      = {"good": 0, "suspect": 1, "warning": 2}
 
-# Badge background/border/text share one status hue (move 4); only the
-# alert badge blinks -- motion is reserved for what needs eyes.
+# Badge background/border/text share one status hue (move 4). Solid, not
+# blinking -- every node always carries a color (green/orange/red), so the
+# color itself is the signal; motion would just add noise once every node
+# has one.
 _STATUS_BADGE_STYLE = {
     "good": {
         "color": "var(--status-nominal-text)",
@@ -65,7 +79,6 @@ _STATUS_BADGE_STYLE = {
         "color": "var(--status-alert-text)",
         "backgroundColor": "var(--status-alert-bg)",
         "border": "1px solid var(--status-alert-border)",
-        "animation": "badge-blink 1.2s ease-in-out infinite",
     },
 }
 _DEFAULT_BADGE_STYLE = {
@@ -87,9 +100,24 @@ def build_operator_tab() -> html.Div:
     return html.Div(children=[
         dcc.Store(id="operator-state-store", data={}),
         dcc.Store(id="selected-node-store", data=None),
+        dcc.Store(id="node-status-filter-store", data="all"),
+        dcc.Store(id="rack-focus-store", data=None),
 
         html.Div(id="operator-summary-bar", className="row",
                   children=render_summary_cards({})),
+
+        html.Div(className="controls-bar", children=[
+            html.Span("Show:", className="label"),
+            html.Div(className="btn-group", children=[
+                html.Button(
+                    label,
+                    id={"type": "node-status-filter-btn", "status": status},
+                    n_clicks=0,
+                    className="btn" + (" btn-active" if status == "all" else ""),
+                )
+                for status, label in NODE_STATUS_FILTERS
+            ]),
+        ]),
 
         html.Div(className="operator-body", children=[
             html.Div(className="rack-grid", children=[
@@ -114,7 +142,7 @@ def render_summary_cards(state: dict) -> list:
 
     return [
         _summary_card("Total Nodes", str(total)),
-        _summary_card("Nominal", str(nominal), COLOR_NOMINAL),
+        _summary_card("Normal", str(nominal), COLOR_NOMINAL),
         _summary_card("Warning", str(warning), COLOR_WARNING),
         _summary_card("Alert", str(alert), COLOR_ALERT),
     ]
@@ -134,7 +162,13 @@ def _build_rack_card(rack_label, node_ids):
         style={"borderColor": COLOR_DEFAULT},
         children=[
             html.Div(className="row", children=[
-                html.Span(rack_label, style={"color": COLOR_TEXT, "fontWeight": "700"}),
+                html.Button(
+                    rack_label,
+                    id={"type": "rack-focus-btn", "rack": rack_label},
+                    n_clicks=0,
+                    className="rack-label-btn",
+                    title="Click to focus this rack, click again to unfocus",
+                ),
                 html.Span("-- W", id={"type": "rack-total-power", "rack": rack_label},
                           className="mono-value", style={"marginLeft": "auto"}),
             ]),
@@ -151,7 +185,7 @@ def _build_node_card(node_id):
         id={"type": "node-card-btn", "node_id": node_id},
         n_clicks=0,
         className="node-card",
-        style={"borderLeftColor": COLOR_DEFAULT},
+        style={"borderColor": COLOR_DEFAULT},
         children=[
             html.Div(node_display_label(node_id), className="node-card-id"),
             html.Div("-- W", id={"type": "node-card-power", "node_id": node_id},
@@ -275,9 +309,10 @@ def _on_node_click(_n_clicks):
     Output({"type": "node-card-badge", "node_id": MATCH}, "style"),
     Output({"type": "node-card-btn", "node_id": MATCH}, "style"),
     Input("operator-state-store", "data"),
+    Input("node-status-filter-store", "data"),
     State({"type": "node-card-btn", "node_id": MATCH}, "id"),
 )
-def _on_node_card_data_update(state, btn_id):
+def _on_node_card_data_update(state, status_filter, btn_id):
     data = (state or {}).get(btn_id["node_id"], {})
 
     status = data.get("status", "--")
@@ -290,13 +325,54 @@ def _on_node_card_data_update(state, btn_id):
     border_color  = _STATUS_TO_BORDER.get(status, COLOR_DEFAULT)
     badge_style   = _STATUS_BADGE_STYLE.get(status, _DEFAULT_BADGE_STYLE)
 
+    dimmed = bool(status_filter) and status_filter != "all" and status_filter != status
+    btn_style = {"borderColor": border_color, "opacity": 0.3 if dimmed else 1}
+
     return (
         power_text,
         temp_text,
         forecast_text,
         badge_style,
-        {"borderLeftColor": border_color},
+        btn_style,
     )
+
+
+@callback(
+    Output("node-status-filter-store", "data"),
+    Input({"type": "node-status-filter-btn", "status": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _on_node_status_filter_click(_n_clicks):
+    triggered = ctx.triggered_id
+    if isinstance(triggered, dict) and triggered.get("type") == "node-status-filter-btn":
+        return triggered["status"]
+    return no_update
+
+
+@callback(
+    *[Output({"type": "node-status-filter-btn", "status": status}, "className")
+      for status, _ in NODE_STATUS_FILTERS],
+    Input("node-status-filter-store", "data"),
+)
+def _on_node_status_filter_style(active_status):
+    return tuple(
+        "btn" + (" btn-active" if status == active_status else "")
+        for status, _ in NODE_STATUS_FILTERS
+    )
+
+
+@callback(
+    Output("rack-focus-store", "data"),
+    Input({"type": "rack-focus-btn", "rack": ALL}, "n_clicks"),
+    State("rack-focus-store", "data"),
+    prevent_initial_call=True,
+)
+def _on_rack_focus_click(_n_clicks, current_focus):
+    triggered = ctx.triggered_id
+    if isinstance(triggered, dict) and triggered.get("type") == "rack-focus-btn":
+        rack = triggered["rack"]
+        return None if rack == current_focus else rack
+    return no_update
 
 
 @callback(
@@ -309,21 +385,42 @@ def _on_node_selection_change(selected_node, btn_id):
     return "node-card" + (" node-card-selected" if is_selected else "")
 
 
+# rack_label -> last real (non-"--") worst_status seen for that rack.
+# Without this, a tick where every node in a rack is momentarily
+# unclassified ("--", e.g. a verification-data gap) would snap the border
+# to COLOR_DEFAULT for one frame -- a green-white-red "blink" instead of a
+# clean direct color switch. Sticking to the last known status skips that.
+_last_rack_status: dict = {}
+
+
 @callback(
     Output({"type": "rack-card", "rack": MATCH}, "style"),
     Output({"type": "rack-total-power", "rack": MATCH}, "children"),
     Input("operator-state-store", "data"),
+    Input("rack-focus-store", "data"),
     State({"type": "rack-card", "rack": MATCH}, "id"),
 )
-def _on_rack_card_data_update(state, rack_id):
-    node_ids = dict(get_rack_groups()).get(rack_id["rack"], [])
+def _on_rack_card_data_update(state, focused_rack, rack_id):
+    rack_label = rack_id["rack"]
+    node_ids = dict(get_rack_groups()).get(rack_label, [])
     state = state or {}
     node_states  = [state.get(nid, {}) for nid in node_ids]
     worst_status = _worst_status(d.get("status", "--") for d in node_states)
     total_power  = sum(d.get("total_power_w") or 0.0 for d in node_states)
 
+    if worst_status == "--" and rack_label in _last_rack_status:
+        worst_status = _last_rack_status[rack_label]
+    elif worst_status != "--":
+        _last_rack_status[rack_label] = worst_status
+
+    dimmed = bool(focused_rack) and focused_rack != rack_label
+    style = {
+        "borderColor": _STATUS_TO_BORDER.get(worst_status, COLOR_DEFAULT),
+        "opacity": 0.4 if dimmed else 1,
+    }
+
     return (
-        {"borderColor": _STATUS_TO_BORDER.get(worst_status, COLOR_DEFAULT)},
+        style,
         f"{total_power:.1f} W",
     )
 

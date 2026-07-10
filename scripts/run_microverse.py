@@ -34,10 +34,14 @@ STATUS OF EACH STAGE (2026-07):
                                    were always identical copies of it
                                    anyway. for_digital_twin.jsonl is now
                                    genuinely consumed by Baron's
-                                   main_run.py (stage 4 below).
-                                   for_dashboard.jsonl is still a
-                                   PLACEHOLDER -- replace once McCray's
-                                   expected interface is confirmed.
+                                   main_run.py (stage 4 below). Also
+                                   writes runs/<component_id>/verification.jsonl
+                                   with real per-node/per-metric detail
+                                   for the dashboard's verification_feed.py,
+                                   and normalizes node ids in for_dashboard.jsonl
+                                   and verification.jsonl to the "node00"
+                                   style the dashboard expects -- see this
+                                   function's docstring below.
     Stage 4 (launch digital twin): REAL. Launches Blender with
                                    main_run.py, which reads
                                    for_digital_twin.jsonl (just written
@@ -507,14 +511,38 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     consistent with the rest of the project rather than inventing a
     new parsing rule.
 
-    PLACEHOLDER destinations -- currently just three real files with
-    identical content:
+    Also collects every VerificationResult verifier.verify() returns
+    (per-node, per-metric -- see verification.py's merged NLR/GPU
+    checks), not just the collapsed worst-of status above, and writes
+    them to runs/<component_id>/verification.jsonl so the dashboard's
+    verification_feed.py has real per-node detail to read instead of
+    falling back to "--" for every sample -- see PIPELINE_SETUP.txt /
+    McCray's dashboard lane for the reader side.
+
+    Destinations (lanes/leiva_verification/outputs/):
         for_scoreboard.jsonl
         for_dashboard.jsonl
         for_digital_twin.jsonl
     Replace with the real dashboard/digital-twin integration once
     their expected interface (file path? socket? HTTP endpoint?) is
     confirmed with McCray/Baron.
+
+    NORMALIZATION: the pipeline's node columns are named after whatever
+    raw identifier the source data used (e.g. SLURM hostnames like
+    "x3105c0s37b0n0"), but the dashboard's node-detection only
+    recognizes "node00".."nodeNN" naming (see
+    lanes/mccray_dashboard/dashboard/data_feed.py's _NODE_PREFIX_RE).
+    Without this step, every dashboard run after a fresh pipeline run
+    would show 0 nodes and the Operator tab's per-node callbacks would
+    error with "Callback error with no output from input" (no node-card
+    components to route the output to). runs/<component_id>/verification.jsonl
+    is normalized the same way, using this exact same rename mapping --
+    its VerificationResult.component_id values embed the same raw node
+    identifiers for_dashboard.jsonl just had renamed, since both come
+    from the same source recording. Without this, the dashboard's
+    per-node status lookup (verification_feed.py) would never match
+    anything, because it looks for the "node00"-style ids, not the raw
+    ones.
 
     Ground truth is never included here -- verifies attacked_path,
     which is the PLAIN file with no "attack" column (see stage_2).
@@ -523,6 +551,10 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     """
     from anchor import AnchorExtractor
     from verification import Verifier
+    from microverse_core.io_records import write_records
+    sys.path.insert(0, str(_REPO_ROOT / "lanes" / "mccray_dashboard" / "tools"))
+    from normalize_node_ids import normalize as normalize_node_ids
+    from normalize_node_ids import normalize_verification_component_ids
 
     print(f"[3/4] Verifying {attacked_path} ...")
     records = list(read_combined_jsonl(str(attacked_path)))
@@ -567,6 +599,12 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     }
     handles = {name: open(path, "w") for name, path in destinations.items()}
 
+    # Every VerificationResult verifier.verify() returns (per-node,
+    # per-metric), not just the collapsed worst-of status written to
+    # the destinations above -- collected here and written to
+    # runs/<component_id>/verification.jsonl once the loop below finishes.
+    all_results = []
+
     try:
         for record in records:
             scoreboard_record = dict(record)
@@ -576,6 +614,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
             record["timestamp"] = float(record["index"]) / 0.5
             anchor = extractor.extract(record["timestamp"])
             results = verifier.verify(record, anchor)
+            all_results.extend(results)
 
             enf_status = "trusted"
             node_status = {nid: "trusted" for nid in node_ids}
@@ -600,9 +639,18 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         for fh in handles.values():
             fh.close()
 
+    verification_path = write_records(args.component_id, "verification", all_results)
+
+    rename = normalize_node_ids(destinations["dashboard"], destinations["dashboard"])
+    normalize_verification_component_ids(rename, Path(verification_path))
+
     print(f"[3/4] Wrote {len(records)} verified records to 3 destinations:")
     for name, dest in destinations.items():
         print(f"       {name:14s} -> {dest}")
+    print(f"[3/4] Wrote {len(all_results)} per-component verification results -> {verification_path}")
+    if rename:
+        print(f"[3/4] Normalized {len(rename)} node id(s) in for_dashboard.jsonl "
+              f"and verification.jsonl for the dashboard (e.g. {next(iter(rename.items()))})")
 
 
 def stage_4_launch_digital_twin() -> None:

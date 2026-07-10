@@ -11,7 +11,7 @@ from ui.blender_feed import render_blender_feed
 from ui.tabs import build_tab_bar, tab_content_style
 from ui.operator import build_operator_tab
 from ui.analyst import build_analyst_tab
-from ui.alert_log import build_alert_log_tab
+from ui.alert_log_tab import build_alert_log_tab
 
 POLL_INTERVAL_MS = 250
 
