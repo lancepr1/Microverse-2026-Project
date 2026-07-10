@@ -32,11 +32,23 @@ STATUS OF EACH STAGE (2026-07):
                                    intermediate "anchor_verified.jsonl"
                                    file, since all three destinations
                                    were always identical copies of it
-                                   anyway. PLACEHOLDER destinations
-                                   (real files, not yet the real
-                                   dashboard/digital-twin integration)
-                                   -- replace once McCray's/Baron's
+                                   anyway. for_digital_twin.jsonl is now
+                                   genuinely consumed by Baron's
+                                   main_run.py (stage 4 below).
+                                   for_dashboard.jsonl is still a
+                                   PLACEHOLDER -- replace once McCray's
                                    expected interface is confirmed.
+    Stage 4 (launch digital twin): REAL. Launches Blender with
+                                   main_run.py, which reads
+                                   for_digital_twin.jsonl (just written
+                                   by stage 3) and plays it back live,
+                                   coloring nodes/ENF green/yellow/red
+                                   by verification status. Not yet
+                                   tested inside actual Blender from
+                                   this end -- main_run.py's own logic
+                                   was validated separately, but the
+                                   full launch-from-here path hasn't
+                                   been run for real yet.
 
 USAGE (2026-07 redesign -- fully interactive, no CLI flags to remember):
     python scripts/run_microverse.py
@@ -71,6 +83,7 @@ at all (discover_nlr_pairs(folder, slurm_id=None)).
 """
 
 import argparse
+import os
 import json
 import re
 import sys
@@ -177,7 +190,20 @@ def gather_inputs():
     print("Microverse-2026-Project -- Data Ingestion")
     print("=" * 70)
 
-    datasets_root = prompt_path("Path to your raw datasets folder")
+    # Fixed, conventional locations -- not prompted for anymore. See
+    # README.md's "Where to put your data" section for the exact
+    # expected layout. Home directory resolved via os.path.expanduser,
+    # portable across usernames/machines rather than hardcoded to one
+    # person's account.
+    home = os.path.expanduser("~")
+    datasets_root = Path(home) / "Projects" / "00_raw_datasets"
+    if not datasets_root.exists():
+        raise RuntimeError(
+            f"Expected your raw NLR datasets at {datasets_root}, but that "
+            f"folder doesn't exist. See README.md's \"Where to put your "
+            f"data\" section -- create that folder and put your dataset "
+            f"folders (training_*, inference_*) inside it."
+        )
     dataset_options = sorted(p.name for p in datasets_root.iterdir() if p.is_dir())
     if not dataset_options:
         raise RuntimeError(f"No dataset folders found in {datasets_root}")
@@ -222,7 +248,14 @@ def gather_inputs():
     else:
         print("  (no SLURM ID needed -- inference datasets don't use one)")
 
-    enf_folder = prompt_path("\nPath to your ENF data folder")
+    enf_folder = Path(home) / "Projects" / "ENF-ML (CNN+MAMBA)" / "Data"
+    if not enf_folder.exists():
+        raise RuntimeError(
+            f"Expected your ENF data at {enf_folder}, but that folder "
+            f"doesn't exist. See README.md's \"Where to put your data\" "
+            f"section -- create that folder and put your DevN_ENF_HrNN.csv "
+            f"files inside it."
+        )
     devices = discover_enf_devices(enf_folder)
     if not devices:
         raise RuntimeError(
@@ -373,10 +406,23 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     else.
     """
     import subprocess
+    import time
 
     output_dir = _REPO_ROOT / "lanes" / "marchisano_attacks" / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
-    before = set(output_dir.glob("attack_*_check.jsonl"))
+
+    # NOT a before/after set-diff -- FIXED (2026-07) after a real run
+    # revealed the bug: Easy Mode produces DETERMINISTIC filenames
+    # (e.g. attack_easy_2.jsonl, always the same for the same choices),
+    # unlike Medium/Hard's randomized scenario IDs (attack_201.jsonl
+    # etc). If a file with that exact name already existed from ANY
+    # earlier run, attack.py just silently overwrites it -- it's not
+    # "new" by set membership, so a before/after diff finds nothing
+    # even though attack.py succeeded and genuinely wrote fresh data.
+    # Modification time is robust to this regardless of whether the
+    # filename is reused or genuinely new. Small negative buffer on
+    # the start time avoids any sub-second clock-precision edge case.
+    start_time = time.time() - 1.0
 
     node_count = args.actual_node_count
 
@@ -391,18 +437,21 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
                                # itself was invoked from
     )
 
-    after = set(output_dir.glob("attack_*_check.jsonl"))
-    new_files = after - before
+    new_files = [
+        f for f in output_dir.glob("attack_*_check.jsonl")
+        if f.stat().st_mtime >= start_time
+    ]
 
     if not new_files:
         raise FileNotFoundError(
-            f"attack.py ran, but no new attack_*_check.jsonl file appeared in "
-            f"{output_dir}. Its output filename varies by scenario and "
-            f"couldn't be found automatically this way -- check attack.py's "
-            f"actual current behavior."
+            f"attack.py ran, but no attack_*_check.jsonl file in "
+            f"{output_dir} was modified during this run. Its output "
+            f"filename varies by scenario and couldn't be found "
+            f"automatically this way -- check attack.py's actual "
+            f"current behavior."
         )
     if len(new_files) > 1:
-        print(f"[2/4] WARNING: multiple new files appeared at once: "
+        print(f"[2/4] WARNING: multiple files modified at once: "
               f"{sorted(new_files)} -- using the most recently modified one, "
               f"but this ambiguity is worth understanding, not just working around.")
 
@@ -556,11 +605,40 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         print(f"       {name:14s} -> {dest}")
 
 
+def stage_4_launch_digital_twin() -> None:
+    """
+    Launches Blender with main_run.py (repo root -- Baron's
+    lane), which reads for_digital_twin.jsonl (just written by stage 3)
+    and plays it back live, one record every 2 seconds, coloring each
+    node and the grid anchor green/yellow/red by verification status.
+
+    Deliberately NOT run in --background mode -- that's Blender's
+    headless mode with no visible viewport at all, which would defeat
+    the entire point of watching the twin update live. Runs with a
+    normal, visible Blender window instead.
+
+    main_run.py has its own interactive prompt for the .blend file path
+    (remembers the last-used path across runs) -- inherits this
+    process's stdin/stdout so that prompt works correctly, same pattern
+    already used for attack.py's own interactive prompts in stage_2.
+    """
+    import subprocess
+
+    print(f"[4/4] Launching Blender with the digital twin ...")
+    print(f"[4/4] main_run.py has its own prompt for the .blend file path -- answer that directly below.\n")
+    subprocess.run(
+        ["blender", "--python", "main_run.py"],
+        check=True,
+        cwd=str(_REPO_ROOT),
+    )
+
+
 def main():
     args = gather_inputs()
     clean_path = stage_1_ingest_and_smooth(args)
     attacked_path = stage_2_inject_attacks(clean_path, args)
     stage_3_verify_and_fork(attacked_path, args)
+    stage_4_launch_digital_twin()
 
 
 if __name__ == "__main__":
