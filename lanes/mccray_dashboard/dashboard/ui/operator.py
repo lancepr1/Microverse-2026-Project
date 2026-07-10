@@ -13,7 +13,7 @@ Node-card/rack-card border colors and the detail panel's status badge are
 driven by Leiva's real-time verification status (good/suspect/warning),
 the only live per-node state signal that exists in this repo today. The
 node card's "forecast" badge reuses that same status as an interim stand-in
-(good->Nominal, suspect->Warning, warning->Alert) -- there is no RNN
+(good->Normal, suspect->Warning, warning->Alert) -- there is no RNN
 forecast model in this repo, so no "Breach ~Xs" countdown is fabricated.
 The detail panel's 30-Second Forecast, Weakpoint RNN, and AI Explanation
 sections are all labeled placeholders for the same reason: none of that
@@ -45,17 +45,17 @@ RACK_SIZE = 4
 
 # (status value in poll state, chip label) -- "all" always first/default.
 NODE_STATUS_FILTERS = [
-    ("all", "All"), ("good", "Nominal"), ("suspect", "Warning"), ("warning", "Alert"),
+    ("all", "All"), ("good", "Normal"), ("suspect", "Warning"), ("warning", "Alert"),
 ]
 
 COLOR_TEXT    = "#0f172a"
 COLOR_LABEL   = "#64748b"
 COLOR_DEFAULT = "#e2e8f0"
 COLOR_NOMINAL = "#16a34a"
-COLOR_WARNING = "#d97706"
+COLOR_WARNING = "#ca8a04"
 COLOR_ALERT   = "#dc2626"
 
-_STATUS_TO_LABEL  = {"good": "Nominal", "suspect": "Warning", "warning": "Alert"}
+_STATUS_TO_LABEL  = {"good": "Normal", "suspect": "Warning", "warning": "Alert"}
 _STATUS_TO_BADGE  = {"good": "NOM", "suspect": "WRN", "warning": "ALR"}
 _STATUS_TO_BORDER = {"good": COLOR_NOMINAL, "suspect": COLOR_WARNING, "warning": COLOR_ALERT}
 _STATUS_RANK      = {"good": 0, "suspect": 1, "warning": 2}
@@ -142,7 +142,7 @@ def render_summary_cards(state: dict) -> list:
 
     return [
         _summary_card("Total Nodes", str(total)),
-        _summary_card("Nominal", str(nominal), COLOR_NOMINAL),
+        _summary_card("Normal", str(nominal), COLOR_NOMINAL),
         _summary_card("Warning", str(warning), COLOR_WARNING),
         _summary_card("Alert", str(alert), COLOR_ALERT),
     ]
@@ -185,7 +185,7 @@ def _build_node_card(node_id):
         id={"type": "node-card-btn", "node_id": node_id},
         n_clicks=0,
         className="node-card",
-        style={"borderLeftColor": COLOR_DEFAULT},
+        style={"borderColor": COLOR_DEFAULT},
         children=[
             html.Div(node_display_label(node_id), className="node-card-id"),
             html.Div("-- W", id={"type": "node-card-power", "node_id": node_id},
@@ -326,7 +326,7 @@ def _on_node_card_data_update(state, status_filter, btn_id):
     badge_style   = _STATUS_BADGE_STYLE.get(status, _DEFAULT_BADGE_STYLE)
 
     dimmed = bool(status_filter) and status_filter != "all" and status_filter != status
-    btn_style = {"borderLeftColor": border_color, "opacity": 0.3 if dimmed else 1}
+    btn_style = {"borderColor": border_color, "opacity": 0.3 if dimmed else 1}
 
     return (
         power_text,
@@ -385,6 +385,14 @@ def _on_node_selection_change(selected_node, btn_id):
     return "node-card" + (" node-card-selected" if is_selected else "")
 
 
+# rack_label -> last real (non-"--") worst_status seen for that rack.
+# Without this, a tick where every node in a rack is momentarily
+# unclassified ("--", e.g. a verification-data gap) would snap the border
+# to COLOR_DEFAULT for one frame -- a green-white-red "blink" instead of a
+# clean direct color switch. Sticking to the last known status skips that.
+_last_rack_status: dict = {}
+
+
 @callback(
     Output({"type": "rack-card", "rack": MATCH}, "style"),
     Output({"type": "rack-total-power", "rack": MATCH}, "children"),
@@ -393,13 +401,19 @@ def _on_node_selection_change(selected_node, btn_id):
     State({"type": "rack-card", "rack": MATCH}, "id"),
 )
 def _on_rack_card_data_update(state, focused_rack, rack_id):
-    node_ids = dict(get_rack_groups()).get(rack_id["rack"], [])
+    rack_label = rack_id["rack"]
+    node_ids = dict(get_rack_groups()).get(rack_label, [])
     state = state or {}
     node_states  = [state.get(nid, {}) for nid in node_ids]
     worst_status = _worst_status(d.get("status", "--") for d in node_states)
     total_power  = sum(d.get("total_power_w") or 0.0 for d in node_states)
 
-    dimmed = bool(focused_rack) and focused_rack != rack_id["rack"]
+    if worst_status == "--" and rack_label in _last_rack_status:
+        worst_status = _last_rack_status[rack_label]
+    elif worst_status != "--":
+        _last_rack_status[rack_label] = worst_status
+
+    dimmed = bool(focused_rack) and focused_rack != rack_label
     style = {
         "borderColor": _STATUS_TO_BORDER.get(worst_status, COLOR_DEFAULT),
         "opacity": 0.4 if dimmed else 1,

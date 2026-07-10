@@ -45,9 +45,9 @@
   --status-nominal-bg:     #f0fdf4;
   --status-nominal-border: #86efac;
 
-  --status-warning-text:   #d97706;
-  --status-warning-bg:     #fffbeb;
-  --status-warning-border: #fcd34d;
+  --status-warning-text:   #ca8a04;
+  --status-warning-bg:     #fefce8;
+  --status-warning-border: #fde047;
 
   --status-alert-text:     #dc2626;
   --status-alert-bg:       #fef2f2;
@@ -304,7 +304,7 @@ hr {
 .rack-card {
   border-width: 1px;
   padding: 16px;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease, border-color 0.3s ease;
 }
 
 /* Rack label doubles as the focus-toggle button -- reset button chrome so
@@ -331,13 +331,11 @@ hr {
   margin-top: 12px;
 }
 
-/* Left-edge status strip: a 2px colored bar on each node card's left
-   edge, matching its status color, so a column of cards scans as a
-   glance -- an operator catches the one off-color strip in peripheral
-   vision before reading anything. */
+/* Thick full-perimeter status border -- the whole card outline carries
+   the status color (not just an edge strip), so status reads at a glance
+   from across the room, not just up close. */
 .node-card {
-  border: 1px solid var(--color-border);
-  border-left-width: 3px;
+  border: 8px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-card-bg);
   padding: 16px 18px;
@@ -352,7 +350,7 @@ hr {
   color: var(--color-text);
   cursor: pointer;
   box-shadow: var(--shadow-card);
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease, border-color 0.3s ease;
 }
 
 .node-card:hover {
