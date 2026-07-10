@@ -18,7 +18,7 @@ import ui.alert_log     # noqa: F401 -- registers the Alert log tab callback
 from data_feed import init_feed, init_multi_feed, poll, get_rack_id
 from history_store import init_history_db, record_sample
 
-app = Dash(__name__, title="AFRL Microverse — Data Center Dashboard")
+app = Dash(__name__, title="Data Center Dashboard")
 init_feed()
 init_multi_feed()
 init_history_db()

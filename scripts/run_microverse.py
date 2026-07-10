@@ -386,6 +386,7 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
     """
     from anchor import AnchorExtractor
     from verification import Verifier
+    from microverse_core.io_records import write_records
 
     print(f"[3/4] Verifying {attacked_path} ...")
     records = list(read_combined_jsonl(str(attacked_path)))
@@ -395,6 +396,15 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
 
     STATUS_RANK = {"trusted": 0, "suspect": 1, "failed": 2}
     STATUS_SCORE = {"trusted": 0.0, "suspect": 0.5, "failed": 1.0}
+
+    # Every VerificationResult verifier.verify() returns (per-node,
+    # per-metric -- see verification.py's merged NLR/GPU checks), not just
+    # the collapsed worst-of status below. Collected here and written to
+    # runs/<component_id>/verification.jsonl so the dashboard's
+    # verification_feed.py has real per-node detail to read instead of
+    # falling back to "--" for every sample -- see PIPELINE_SETUP.txt /
+    # McCray's dashboard lane for the reader side.
+    all_results = []
 
     out_path = Path(args.output_dir) / "anchor_verified.jsonl"
     with open(out_path, "w") as out_fh:
@@ -406,6 +416,7 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
             record["timestamp"] = float(record["index"]) / 0.5
             anchor = extractor.extract(record["timestamp"])
             results = verifier.verify(record, anchor)
+            all_results.extend(results)
 
             worst = "trusted"
             for result in results:
@@ -415,7 +426,10 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
 
             out_fh.write(json.dumps(scoreboard_record) + "\n")
 
+    verification_path = write_records(args.component_id, "verification", all_results)
+
     print(f"[3/4] Wrote {len(records)} verified records -> {out_path}")
+    print(f"[3/4] Wrote {len(all_results)} per-component verification results -> {verification_path}")
     return out_path
 
 
@@ -428,8 +442,32 @@ def stage_4_fork_outputs(verified_path: Path, args) -> None:
     file copies to conventionally-named paths. Replace with the real
     dashboard/digital-twin integration once their expected interface
     (file path? socket? HTTP endpoint?) is confirmed with McCray/Baron.
+
+    The dashboard copy is additionally normalized in place: the pipeline's
+    node columns are named after whatever raw identifier the source data
+    used (e.g. SLURM hostnames like "x3105c0s37b0n0"), but the dashboard's
+    node-detection only recognizes "node00".."nodeNN" naming (see
+    lanes/mccray_dashboard/dashboard/data_feed.py's _NODE_PREFIX_RE). Without
+    this step every dashboard run after a fresh pipeline run would show 0
+    nodes and the Operator tab's per-node callbacks would error with
+    "Callback error with no output from input" (no node-card components to
+    route the output to).
+
+    runs/<component_id>/verification.jsonl (written by
+    stage_3_verify_and_annotate) is normalized the same way, using this
+    exact same rename mapping -- its VerificationResult.component_id values
+    embed the same raw node identifiers for_dashboard.jsonl just had
+    renamed, since both come from the same source recording. Without this,
+    the dashboard's per-node status lookup (verification_feed.py) would
+    never match anything, because it looks for the "node00"-style ids, not
+    the raw ones.
     """
     import shutil
+    import sys
+    sys.path.insert(0, str(_REPO_ROOT / "lanes" / "mccray_dashboard" / "tools"))
+    from normalize_node_ids import normalize as normalize_node_ids
+    from normalize_node_ids import normalize_verification_component_ids
+
     out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     destinations = {
@@ -440,9 +478,16 @@ def stage_4_fork_outputs(verified_path: Path, args) -> None:
     for name, dest in destinations.items():
         shutil.copy(str(verified_path), str(dest))
 
+    rename = normalize_node_ids(destinations["dashboard"], destinations["dashboard"])
+    verification_path = _REPO_ROOT / "runs" / args.component_id / "verification.jsonl"
+    normalize_verification_component_ids(rename, verification_path)
+
     print(f"[4/4] Forked output to:")
     for name, dest in destinations.items():
         print(f"       {name:14s} -> {dest}")
+    if rename:
+        print(f"[4/4] Normalized {len(rename)} node id(s) in for_dashboard.jsonl "
+              f"for the dashboard (e.g. {next(iter(rename.items()))})")
 
 
 def main():

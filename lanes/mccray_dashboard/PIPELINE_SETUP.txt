@@ -1,0 +1,55 @@
+Microverse 16-Node Dashboard -- Setup & Run
+=============================================
+
+1. Open a terminal and go to the repo root:
+   cd /home/tyson/Downloads/Microverse-2026-Project-1
+
+2. Activate the virtual environment:
+   source .venv/bin/activate
+
+3. (Only if dependencies are missing) Install requirements:
+   pip install -r requirements.txt
+
+4. Run the pipeline:
+   python scripts/run_microverse.py
+
+5. When prompted, answer:
+   - Path to raw datasets folder: /home/tyson/Downloads/00_raw_datasets
+   - Which dataset to ingest: training_llama2_70b_lora
+   - How many nodes: 16node
+   - Which SLURM job ID: pick any (e.g. option 1)
+   - Path to ENF data folder: /home/tyson/Downloads/enf
+   - Which recording device: Dev1
+   - Which hour: any (e.g. Hr01)
+   - Component ID: leave blank for default (rack_00)
+
+6. attack.py launches automatically as part of the same run. Answer its prompts:
+   - Select Detection Evaluation Difficulty: 1 (Easy)
+   - Select Attack Engine: pick one you haven't used before (check
+     lanes/marchisano_attacks/outputs/ for existing attack_easy_N_check.jsonl
+     files -- reusing a number will crash the pipeline)
+   - Select Target Metric Category: 6 (Everything)
+   - If you picked Injection as the engine: Injection Sub-Type 1 (Bias),
+     value 10.0 (or press enter for default)
+
+7. The pipeline finishes by writing three files to
+   lanes/leiva_verification/outputs/: for_scoreboard.jsonl, for_dashboard.jsonl,
+   for_digital_twin.jsonl. Step 4 also auto-normalizes for_dashboard.jsonl's
+   node IDs (real hostnames -> node00-style names) as its last action, so
+   step 8 below is no longer a separate manual step -- it happens for you.
+
+8. (Only needed if for_dashboard.jsonl was produced some other way, not via
+   run_microverse.py) Normalize node IDs so the dashboard can read them:
+   python lanes/mccray_dashboard/tools/normalize_node_ids.py
+
+9. Start the dashboard:
+   cd lanes/mccray_dashboard/dashboard
+   python main.py
+
+10. Open a browser to http://127.0.0.1:8050/
+
+11. If the page shows errors or "Total Nodes: 0", it usually means an old
+    dashboard process is still running from a previous session and holding
+    the port. Stop it first:
+    pkill -9 -f main.py
+    then repeat step 9.
