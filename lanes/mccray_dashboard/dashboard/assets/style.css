@@ -156,6 +156,16 @@ hr {
   background: #f8fafc;
 }
 
+/* Generic active state for filter/toggle chips (Alert log severity
+   filter, Operator status filter) -- .tab-btn has its own bespoke
+   active treatment below, this is for plain .btn chip rows. */
+.btn.btn-active,
+.btn.btn-active:hover {
+  background: rgba(79, 70, 229, 0.08);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .panel {
   background: var(--color-card-bg);
   border: 1px solid var(--color-border);
@@ -294,6 +304,24 @@ hr {
 .rack-card {
   border-width: 1px;
   padding: 16px;
+  transition: opacity 0.2s ease;
+}
+
+/* Rack label doubles as the focus-toggle button -- reset button chrome so
+   it reads as a plain heading until hovered. */
+.rack-label-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--color-text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rack-label-btn:hover {
+  color: var(--color-accent);
 }
 
 .node-grid {
@@ -324,6 +352,7 @@ hr {
   color: var(--color-text);
   cursor: pointer;
   box-shadow: var(--shadow-card);
+  transition: opacity 0.2s ease;
 }
 
 .node-card:hover {
@@ -353,12 +382,6 @@ hr {
   font-size: 10px;
   letter-spacing: 0.4px;
   width: fit-content;
-}
-
-/* Only the alert badge animates -- motion is reserved for what needs eyes. */
-@keyframes badge-blink {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.45; }
 }
 
 .operator-detail-panel {
@@ -391,6 +414,68 @@ hr {
 .alert-log-scroll {
   max-height: 320px;
   overflow-y: auto;
+}
+
+/* Grouped Alert Log view (alert_grouping.py + ui/grouped_alert_table.py)
+   -- built as flex rows rather than a <table>, since <details> can't nest
+   inside <tr>/<td> cleanly; reuses the same tokens/spacing the flat
+   .alert-table already uses so the two views read as one system. */
+.grp-view-toggle {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--color-label);
+}
+
+.grp-incident-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.grp-incident,
+.grp-incident-row {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-card-bg);
+}
+
+.grp-incident-summary,
+.grp-incident-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.grp-incident-summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.grp-incident-summary::-webkit-details-marker {
+  color: var(--color-label);
+}
+
+.grp-incident-children {
+  border-top: 1px solid var(--color-border);
+  padding: 4px 10px 4px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.grp-child-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--color-label);
+}
+
+.grp-cell {
+  white-space: nowrap;
 }
 
 .alert-table {
