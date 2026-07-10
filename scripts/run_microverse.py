@@ -18,21 +18,41 @@ correctly too.
 
 STATUS OF EACH STAGE (2026-07):
     Stage 1 (ingest + smooth):    REAL, tested, working.
-    Stage 2 (attack injection):   Wired up against attack.py's current
-                                   (still-being-developed) behavior --
-                                   confirm it still works if that
-                                   changes on Ethan's end.
-    Stage 3 (verify + annotate):  REAL, tested, working -- this is the
-                                   same logic as verify_file.py,
-                                   refactored into an importable
-                                   function so this script can call it
-                                   in-process instead of shelling out.
-    Stage 4 (fork to 3 outputs):  PLACEHOLDER destinations, REAL file
-                                   writes -- writes to
-                                   lanes/leiva_verification/outputs/.
-                                   Replace with the real dashboard/
-                                   digital-twin integration once their
-                                   expected interface is confirmed.
+    Stage 2 (attack injection):   Wired up against attack.py's real
+                                   confirmed behavior (--nodes CLI arg,
+                                   reads run_{N}node.jsonl, writes both
+                                   a plain and a _check file). Only the
+                                   plain file (no ground truth) is ever
+                                   fed to verification -- see
+                                   stage_2_inject_attacks()'s docstring
+                                   for why that boundary matters.
+    Stage 3 (verify + fork):      REAL, tested, working. Verifies and
+                                   writes directly to all three
+                                   destinations in one pass -- no
+                                   intermediate "anchor_verified.jsonl"
+                                   file, since all three destinations
+                                   were always identical copies of it
+                                   anyway. for_digital_twin.jsonl is now
+                                   genuinely consumed by Baron's
+                                   main_run.py (stage 4 below). Also
+                                   writes runs/<component_id>/verification.jsonl
+                                   with real per-node/per-metric detail
+                                   for the dashboard's verification_feed.py,
+                                   and normalizes node ids in for_dashboard.jsonl
+                                   and verification.jsonl to the "node00"
+                                   style the dashboard expects -- see this
+                                   function's docstring below.
+    Stage 4 (launch digital twin): REAL. Launches Blender with
+                                   main_run.py, which reads
+                                   for_digital_twin.jsonl (just written
+                                   by stage 3) and plays it back live,
+                                   coloring nodes/ENF green/yellow/red
+                                   by verification status. Not yet
+                                   tested inside actual Blender from
+                                   this end -- main_run.py's own logic
+                                   was validated separately, but the
+                                   full launch-from-here path hasn't
+                                   been run for real yet.
 
 USAGE (2026-07 redesign -- fully interactive, no CLI flags to remember):
     python scripts/run_microverse.py
@@ -67,6 +87,7 @@ at all (discover_nlr_pairs(folder, slurm_id=None)).
 """
 
 import argparse
+import os
 import json
 import re
 import sys
@@ -173,7 +194,20 @@ def gather_inputs():
     print("Microverse-2026-Project -- Data Ingestion")
     print("=" * 70)
 
-    datasets_root = prompt_path("Path to your raw datasets folder")
+    # Fixed, conventional locations -- not prompted for anymore. See
+    # README.md's "Where to put your data" section for the exact
+    # expected layout. Home directory resolved via os.path.expanduser,
+    # portable across usernames/machines rather than hardcoded to one
+    # person's account.
+    home = os.path.expanduser("~")
+    datasets_root = Path(home) / "Projects" / "00_raw_datasets"
+    if not datasets_root.exists():
+        raise RuntimeError(
+            f"Expected your raw NLR datasets at {datasets_root}, but that "
+            f"folder doesn't exist. See README.md's \"Where to put your "
+            f"data\" section -- create that folder and put your dataset "
+            f"folders (training_*, inference_*) inside it."
+        )
     dataset_options = sorted(p.name for p in datasets_root.iterdir() if p.is_dir())
     if not dataset_options:
         raise RuntimeError(f"No dataset folders found in {datasets_root}")
@@ -187,13 +221,22 @@ def gather_inputs():
         (p.name for p in dataset_path.iterdir() if p.is_dir()),
         key=_node_sort_key,
     )
-    if not node_options:
-        raise RuntimeError(f"No node-count folders found in {dataset_path}")
-
-    node_folder_name = prompt_choice(
-        f"How many nodes? (options found under {dataset_name})", node_options
-    )
-    node_folder = dataset_path / node_folder_name
+    if node_options:
+        node_folder_name = prompt_choice(
+            f"How many nodes? (options found under {dataset_name})", node_options
+        )
+        node_folder = dataset_path / node_folder_name
+    else:
+        # No Nnode subfolders under this dataset (confirmed 2026-07:
+        # not every dataset has them the way the two training datasets
+        # tested earlier did -- inference_offline_llama3_70b has files
+        # directly inside it instead). Use the dataset folder itself.
+        # The ACTUAL node count gets determined later from what
+        # discover_nlr_pairs() really finds there, in stage_1 -- not
+        # guessed from a folder name that may not exist.
+        print(f"  (no node-count subfolders under {dataset_name} -- using its files directly)")
+        node_folder = dataset_path
+        node_folder_name = None
 
     slurm_id = None
     if workload_type == "training":
@@ -209,7 +252,14 @@ def gather_inputs():
     else:
         print("  (no SLURM ID needed -- inference datasets don't use one)")
 
-    enf_folder = prompt_path("\nPath to your ENF data folder")
+    enf_folder = Path(home) / "Projects" / "ENF-ML (CNN+MAMBA)" / "Data"
+    if not enf_folder.exists():
+        raise RuntimeError(
+            f"Expected your ENF data at {enf_folder}, but that folder "
+            f"doesn't exist. See README.md's \"Where to put your data\" "
+            f"section -- create that folder and put your DevN_ENF_HrNN.csv "
+            f"files inside it."
+        )
     devices = discover_enf_devices(enf_folder)
     if not devices:
         raise RuntimeError(
@@ -270,6 +320,14 @@ def stage_1_ingest_and_smooth(args) -> Path:
     enf = load_enf(args.enf_path)
     enf = combined_smooth(enf)
 
+    # Held here, before attack injection ever runs, as the untampered
+    # reference for _ENFBaselineCheck in stage_3 -- same "clean
+    # upstream of the attacker" principle as combined_smooth() itself.
+    # This exact array, not a re-derived or re-loaded copy, is what
+    # gets compared against later -- guarantees it was never anywhere
+    # near attack.py.
+    args.enf_baseline = list(enf)
+
     print(f"[1/4] Discovering NLR pairs in {args.nlr_folder} "
           f"(workload_type={args.workload_type}) ...")
     slurm_id = args.slurm_id if args.workload_type == "training" else None
@@ -293,17 +351,19 @@ def stage_1_ingest_and_smooth(args) -> Path:
     node_windows = load_nlr_multi(pairs)
     records = build_combined_records(enf, node_windows)
 
-    # Named after the actual node folder the user selected (e.g.
-    # "run_4node.jsonl", "run_1node.jsonl") -- traceable to the real
-    # choice made in gather_inputs(), rather than a hardcoded guess.
+    # Node count comes from what discover_nlr_pairs() ACTUALLY found
+    # (len(pairs)) -- not from a folder name, which may not exist at
+    # all (confirmed 2026-07: not every dataset has Nnode subfolders,
+    # e.g. inference_offline_llama3_70b has files directly inside it
+    # instead). This is robust to either folder structure. Stored on
+    # args so stage_2 can pass the same real count to attack.py's
+    # --nodes without needing to re-derive or guess it.
     #
     # CONFIRMED 2026-07 from reading attack.py's actual source: it
     # constructs exactly f"run_{args.nodes}node.jsonl", where
     # args.nodes comes from its own --nodes CLI argument (default 2).
-    # stage_2 passes --nodes matching this exact filename, so any
-    # node count works correctly now -- no longer limited to 2-node
-    # runs the way earlier versions of this pipeline assumed.
-    out_filename = f"run_{getattr(args, 'node_folder_name', None) or '2node'}"
+    args.actual_node_count = len(pairs)
+    out_filename = f"run_{args.actual_node_count}node"
     out_path = Path(args.output_dir) / f"{out_filename}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_combined_jsonl(records, str(out_path))
@@ -318,34 +378,57 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     INPUT: takes a real CLI argument, --nodes N (default 2), used to
     construct exactly f"run_{N}node.jsonl" in data/combined/. This
     generalizes cleanly -- no more "only works for 2-node runs"
-    limitation. Passed here as whatever node count was actually
-    selected in gather_inputs(), kept in sync with stage_1's output
-    filename since both derive from the same node_folder_name.
+    limitation. Passed here as args.actual_node_count, which stage_1
+    sets from len(pairs) -- the REAL count of nodes discover_nlr_pairs()
+    actually found, not a count parsed from a folder name (which may
+    not exist at all -- confirmed 2026-07 that not every dataset has
+    Nnode subfolders the way the two training datasets tested earlier
+    did). Kept in sync with stage_1's output filename since both
+    derive from this same real count.
 
     OUTPUT: writes TWO files per run to lanes/marchisano_attacks/outputs/:
     attack_{id}.jsonl (no ground truth) AND attack_{id}_check.jsonl
     (same data, plus a 0/1 "attack" ground-truth column). {id} varies
     by which scenario got selected (interactively, or randomly for
     medium/hard preset scenarios) -- genuinely unpredictable in
-    advance, so still found via before/after directory diffing.
+    advance, so found via before/after directory diffing (globbing
+    specifically on "attack_*_check.jsonl" -- the broader
+    "attack_*.jsonl" would match both files written each run and
+    incorrectly trigger the "multiple new files" ambiguity path every
+    single time).
 
-    IMPORTANT FIX: must specifically glob "attack_*_check.jsonl", not
-    the broader "attack_*.jsonl" -- the broad pattern matches BOTH
-    files written each run, which would incorrectly trigger the
-    "multiple new files" ambiguity path on every single run. The
-    _check version is deliberately the one used here (not the plain
-    version) -- it carries ground truth alongside our verdict, which
-    is genuinely useful for the scoreboard, though worth confirming
-    with whoever owns it whether they want that ground-truth column
-    visible or stripped before it reaches them.
+    CRITICAL DESIGN RULE (2026-07, corrected after review): the
+    verifier must NEVER be given the ground-truth "attack" column --
+    that defeats the entire point of independent verification, even
+    though our Verifier class happens to ignore unknown fields today
+    (fragile to rely on that staying true). So this function returns
+    BOTH paths as a tuple: (plain_path, check_path). Only plain_path
+    (found by stripping "_check" off the discovered check_path's name)
+    goes anywhere near stage_3/verification. check_path is carried
+    forward untouched, used only at the very end for scoring -- see
+    stage_4, which sends it to the scoreboard specifically and nowhere
+    else.
     """
     import subprocess
+    import time
 
     output_dir = _REPO_ROOT / "lanes" / "marchisano_attacks" / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
-    before = set(output_dir.glob("attack_*_check.jsonl"))
 
-    node_count = _node_sort_key(getattr(args, "node_folder_name", None) or "2node")
+    # NOT a before/after set-diff -- FIXED (2026-07) after a real run
+    # revealed the bug: Easy Mode produces DETERMINISTIC filenames
+    # (e.g. attack_easy_2.jsonl, always the same for the same choices),
+    # unlike Medium/Hard's randomized scenario IDs (attack_201.jsonl
+    # etc). If a file with that exact name already existed from ANY
+    # earlier run, attack.py just silently overwrites it -- it's not
+    # "new" by set membership, so a before/after diff finds nothing
+    # even though attack.py succeeded and genuinely wrote fresh data.
+    # Modification time is robust to this regardless of whether the
+    # filename is reused or genuinely new. Small negative buffer on
+    # the start time avoids any sub-second clock-precision edge case.
+    start_time = time.time() - 1.0
+
+    node_count = args.actual_node_count
 
     print(f"[2/4] Launching attack.py --nodes {node_count} "
           f"(reads {clean_path}) ...")
@@ -358,56 +441,171 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
                                # itself was invoked from
     )
 
-    after = set(output_dir.glob("attack_*_check.jsonl"))
-    new_files = after - before
+    new_files = [
+        f for f in output_dir.glob("attack_*_check.jsonl")
+        if f.stat().st_mtime >= start_time
+    ]
 
     if not new_files:
         raise FileNotFoundError(
-            f"attack.py ran, but no new attack_*_check.jsonl file appeared in "
-            f"{output_dir}. Its output filename varies by scenario and "
-            f"couldn't be found automatically this way -- check attack.py's "
-            f"actual current behavior."
+            f"attack.py ran, but no attack_*_check.jsonl file in "
+            f"{output_dir} was modified during this run. Its output "
+            f"filename varies by scenario and couldn't be found "
+            f"automatically this way -- check attack.py's actual "
+            f"current behavior."
         )
     if len(new_files) > 1:
-        print(f"[2/4] WARNING: multiple new files appeared at once: "
+        print(f"[2/4] WARNING: multiple files modified at once: "
               f"{sorted(new_files)} -- using the most recently modified one, "
               f"but this ambiguity is worth understanding, not just working around.")
 
-    attacked_path = max(new_files, key=lambda p: p.stat().st_mtime)
-    print(f"[2/4] attack.py finished -> {attacked_path}")
-    return attacked_path
+    check_path = max(new_files, key=lambda p: p.stat().st_mtime)
+
+    # CRITICAL: the verifier must NEVER see the ground-truth "attack"
+    # column -- that would undermine the entire point of independent
+    # verification. attack.py writes a PLAIN file alongside the _check
+    # one (same scenario ID, no ground truth added) -- that's what
+    # gets fed into stage 3, not this _check file. check_path is only
+    # used here, internally, to reliably locate plain_path -- Ethan
+    # handles ground truth/scoring separately with his own copy of the
+    # _check file, so nothing downstream of this function needs it.
+    plain_path = check_path.parent / check_path.name.replace("_check.jsonl", ".jsonl")
+    if not plain_path.exists():
+        raise FileNotFoundError(
+            f"Found {check_path} but its plain (no-ground-truth) counterpart "
+            f"{plain_path} doesn't exist -- attack.py is expected to write "
+            f"both every run. Verification cannot proceed safely without "
+            f"the plain file, since the _check file must never be what the "
+            f"verifier actually processes."
+        )
+
+    print(f"[2/4] attack.py finished -> {plain_path} (fed to verifier)")
+    return plain_path
 
 
-def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
+def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     """
-    Runs verification, produces the status-annotated JSONL -- same
-    logic as verify_file.py (0.0=trusted, 0.5=suspect, 1.0=failed,
-    worst-of across every component checked each window).
+    Runs verification and writes the result DIRECTLY to all three
+    destinations in one pass -- no "anchor_verified.jsonl" intermediate
+    file, since all three destinations were always going to be
+    identical copies of it anyway.
+
+    OUTPUT COLUMNS (2026-07 redesign, replacing the old single
+    catch-all "status" field): no overall summary field anymore.
+    Instead:
+        ENF_status              -- worst-of every ENF-related check
+                                    (confidence, drift, raw-value
+                                    trend, and the new baseline
+                                    comparison)
+        {node_id}_status         -- one per node ACTUALLY PRESENT in
+                                    this run's data, worst-of just that
+                                    node's own metrics (GPU watts/temps,
+                                    CPU watts/energy). Variable count --
+                                    a 1-node run gets 1 column, a
+                                    16-node run gets 16, driven by the
+                                    real data, never hardcoded.
+    All values use the same 0.0/0.5/1.0 (trusted/suspect/failed)
+    encoding as before. Node ID is parsed from each result's
+    component_id using the same convention attack.py's own
+    scan_telemetry_schema() uses (split on "_gpu"/"_cpu") -- kept
+    consistent with the rest of the project rather than inventing a
+    new parsing rule.
+
+    Also collects every VerificationResult verifier.verify() returns
+    (per-node, per-metric -- see verification.py's merged NLR/GPU
+    checks), not just the collapsed worst-of status above, and writes
+    them to runs/<component_id>/verification.jsonl so the dashboard's
+    verification_feed.py has real per-node detail to read instead of
+    falling back to "--" for every sample -- see PIPELINE_SETUP.txt /
+    McCray's dashboard lane for the reader side.
+
+    Destinations (lanes/leiva_verification/outputs/):
+        for_scoreboard.jsonl
+        for_dashboard.jsonl
+        for_digital_twin.jsonl
+    Replace with the real dashboard/digital-twin integration once
+    their expected interface (file path? socket? HTTP endpoint?) is
+    confirmed with McCray/Baron.
+
+    NORMALIZATION: the pipeline's node columns are named after whatever
+    raw identifier the source data used (e.g. SLURM hostnames like
+    "x3105c0s37b0n0"), but the dashboard's node-detection only
+    recognizes "node00".."nodeNN" naming (see
+    lanes/mccray_dashboard/dashboard/data_feed.py's _NODE_PREFIX_RE).
+    Without this step, every dashboard run after a fresh pipeline run
+    would show 0 nodes and the Operator tab's per-node callbacks would
+    error with "Callback error with no output from input" (no node-card
+    components to route the output to). runs/<component_id>/verification.jsonl
+    is normalized the same way, using this exact same rename mapping --
+    its VerificationResult.component_id values embed the same raw node
+    identifiers for_dashboard.jsonl just had renamed, since both come
+    from the same source recording. Without this, the dashboard's
+    per-node status lookup (verification_feed.py) would never match
+    anything, because it looks for the "node00"-style ids, not the raw
+    ones.
+
+    Ground truth is never included here -- verifies attacked_path,
+    which is the PLAIN file with no "attack" column (see stage_2).
+    Ethan maintains his own ground-truth copy for scoring/metrics
+    separately -- not this pipeline's concern.
     """
     from anchor import AnchorExtractor
     from verification import Verifier
     from microverse_core.io_records import write_records
+    sys.path.insert(0, str(_REPO_ROOT / "lanes" / "mccray_dashboard" / "tools"))
+    from normalize_node_ids import normalize as normalize_node_ids
+    from normalize_node_ids import normalize_verification_component_ids
 
     print(f"[3/4] Verifying {attacked_path} ...")
     records = list(read_combined_jsonl(str(attacked_path)))
     enf_list = [r["FRQ"] for r in records]
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
-    verifier = Verifier(component_id=args.component_id, warmup_windows=10, check_nlr=True)
+    verifier = Verifier(
+        component_id=args.component_id,
+        warmup_windows=10,
+        check_nlr=True,
+        enf_baseline=getattr(args, "enf_baseline", None),
+    )
 
     STATUS_RANK = {"trusted": 0, "suspect": 1, "failed": 2}
     STATUS_SCORE = {"trusted": 0.0, "suspect": 0.5, "failed": 1.0}
 
+    def node_id_of(component_id: str) -> str:
+        """Strips the leading 'rack_00/' prefix, then extracts the node
+        ID the same way attack.py's scan_telemetry_schema() does."""
+        name = component_id.split("/", 1)[-1]
+        if "_gpu" in name:
+            return name.split("_gpu")[0]
+        if "_cpu" in name:
+            return name.split("_cpu")[0]
+        return None  # ENF, or anything else not tied to a specific node
+
+    # Determine which nodes are actually present ONCE, from the first
+    # record's own field names -- fixed for the whole run, so every
+    # output record gets exactly the same set of columns.
+    sample_keys = [k for k in records[0].keys() if k not in ("index", "FRQ", "timestamp")]
+    node_ids = sorted({
+        (k.split("_gpu")[0] if "_gpu" in k else k.split("_cpu")[0])
+        for k in sample_keys if "_gpu" in k or "_cpu" in k
+    })
+    print(f"[3/4] {len(node_ids)} node column(s): {node_ids}")
+
+    out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    destinations = {
+        "scoreboard": out_dir / "for_scoreboard.jsonl",
+        "dashboard": out_dir / "for_dashboard.jsonl",
+        "digital_twin": out_dir / "for_digital_twin.jsonl",
+    }
+    handles = {name: open(path, "w") for name, path in destinations.items()}
+
     # Every VerificationResult verifier.verify() returns (per-node,
-    # per-metric -- see verification.py's merged NLR/GPU checks), not just
-    # the collapsed worst-of status below. Collected here and written to
-    # runs/<component_id>/verification.jsonl so the dashboard's
-    # verification_feed.py has real per-node detail to read instead of
-    # falling back to "--" for every sample -- see PIPELINE_SETUP.txt /
-    # McCray's dashboard lane for the reader side.
+    # per-metric), not just the collapsed worst-of status written to
+    # the destinations above -- collected here and written to
+    # runs/<component_id>/verification.jsonl once the loop below finishes.
     all_results = []
 
-    out_path = Path(args.output_dir) / "anchor_verified.jsonl"
-    with open(out_path, "w") as out_fh:
+    try:
         for record in records:
             scoreboard_record = dict(record)
             record = dict(record)
@@ -418,84 +616,77 @@ def stage_3_verify_and_annotate(attacked_path: Path, args) -> Path:
             results = verifier.verify(record, anchor)
             all_results.extend(results)
 
-            worst = "trusted"
-            for result in results:
-                if STATUS_RANK[result.status] > STATUS_RANK[worst]:
-                    worst = result.status
-            scoreboard_record["status"] = STATUS_SCORE[worst]
+            enf_status = "trusted"
+            node_status = {nid: "trusted" for nid in node_ids}
 
-            out_fh.write(json.dumps(scoreboard_record) + "\n")
+            for result in results:
+                nid = node_id_of(result.component_id)
+                if nid is None:
+                    if STATUS_RANK[result.status] > STATUS_RANK[enf_status]:
+                        enf_status = result.status
+                elif nid in node_status:
+                    if STATUS_RANK[result.status] > STATUS_RANK[node_status[nid]]:
+                        node_status[nid] = result.status
+
+            scoreboard_record["ENF_status"] = STATUS_SCORE[enf_status]
+            for nid in node_ids:
+                scoreboard_record[f"{nid}_status"] = STATUS_SCORE[node_status[nid]]
+
+            line = json.dumps(scoreboard_record) + "\n"
+            for fh in handles.values():
+                fh.write(line)
+    finally:
+        for fh in handles.values():
+            fh.close()
 
     verification_path = write_records(args.component_id, "verification", all_results)
 
-    print(f"[3/4] Wrote {len(records)} verified records -> {out_path}")
-    print(f"[3/4] Wrote {len(all_results)} per-component verification results -> {verification_path}")
-    return out_path
-
-
-def stage_4_fork_outputs(verified_path: Path, args) -> None:
-    """
-    PLACEHOLDER. Sends the verified, annotated JSONL to three
-    destinations: scoreboard, dashboard, digital twin.
-
-    Writes to lanes/leiva_verification/outputs/ -- currently three
-    file copies to conventionally-named paths. Replace with the real
-    dashboard/digital-twin integration once their expected interface
-    (file path? socket? HTTP endpoint?) is confirmed with McCray/Baron.
-
-    The dashboard copy is additionally normalized in place: the pipeline's
-    node columns are named after whatever raw identifier the source data
-    used (e.g. SLURM hostnames like "x3105c0s37b0n0"), but the dashboard's
-    node-detection only recognizes "node00".."nodeNN" naming (see
-    lanes/mccray_dashboard/dashboard/data_feed.py's _NODE_PREFIX_RE). Without
-    this step every dashboard run after a fresh pipeline run would show 0
-    nodes and the Operator tab's per-node callbacks would error with
-    "Callback error with no output from input" (no node-card components to
-    route the output to).
-
-    runs/<component_id>/verification.jsonl (written by
-    stage_3_verify_and_annotate) is normalized the same way, using this
-    exact same rename mapping -- its VerificationResult.component_id values
-    embed the same raw node identifiers for_dashboard.jsonl just had
-    renamed, since both come from the same source recording. Without this,
-    the dashboard's per-node status lookup (verification_feed.py) would
-    never match anything, because it looks for the "node00"-style ids, not
-    the raw ones.
-    """
-    import shutil
-    import sys
-    sys.path.insert(0, str(_REPO_ROOT / "lanes" / "mccray_dashboard" / "tools"))
-    from normalize_node_ids import normalize as normalize_node_ids
-    from normalize_node_ids import normalize_verification_component_ids
-
-    out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    destinations = {
-        "scoreboard": out_dir / "for_scoreboard.jsonl",
-        "dashboard": out_dir / "for_dashboard.jsonl",
-        "digital_twin": out_dir / "for_digital_twin.jsonl",
-    }
-    for name, dest in destinations.items():
-        shutil.copy(str(verified_path), str(dest))
-
     rename = normalize_node_ids(destinations["dashboard"], destinations["dashboard"])
-    verification_path = _REPO_ROOT / "runs" / args.component_id / "verification.jsonl"
-    normalize_verification_component_ids(rename, verification_path)
+    normalize_verification_component_ids(rename, Path(verification_path))
 
-    print(f"[4/4] Forked output to:")
+    print(f"[3/4] Wrote {len(records)} verified records to 3 destinations:")
     for name, dest in destinations.items():
         print(f"       {name:14s} -> {dest}")
+    print(f"[3/4] Wrote {len(all_results)} per-component verification results -> {verification_path}")
     if rename:
-        print(f"[4/4] Normalized {len(rename)} node id(s) in for_dashboard.jsonl "
-              f"for the dashboard (e.g. {next(iter(rename.items()))})")
+        print(f"[3/4] Normalized {len(rename)} node id(s) in for_dashboard.jsonl "
+              f"and verification.jsonl for the dashboard (e.g. {next(iter(rename.items()))})")
+
+
+def stage_4_launch_digital_twin() -> None:
+    """
+    Launches Blender with main_run.py (repo root -- Baron's
+    lane), which reads for_digital_twin.jsonl (just written by stage 3)
+    and plays it back live, one record every 2 seconds, coloring each
+    node and the grid anchor green/yellow/red by verification status.
+
+    Deliberately NOT run in --background mode -- that's Blender's
+    headless mode with no visible viewport at all, which would defeat
+    the entire point of watching the twin update live. Runs with a
+    normal, visible Blender window instead.
+
+    main_run.py has its own interactive prompt for the .blend file path
+    (remembers the last-used path across runs) -- inherits this
+    process's stdin/stdout so that prompt works correctly, same pattern
+    already used for attack.py's own interactive prompts in stage_2.
+    """
+    import subprocess
+
+    print(f"[4/4] Launching Blender with the digital twin ...")
+    print(f"[4/4] main_run.py has its own prompt for the .blend file path -- answer that directly below.\n")
+    subprocess.run(
+        ["blender", "--python", "main_run.py"],
+        check=True,
+        cwd=str(_REPO_ROOT),
+    )
 
 
 def main():
     args = gather_inputs()
     clean_path = stage_1_ingest_and_smooth(args)
     attacked_path = stage_2_inject_attacks(clean_path, args)
-    verified_path = stage_3_verify_and_annotate(attacked_path, args)
-    stage_4_fork_outputs(verified_path, args)
+    stage_3_verify_and_fork(attacked_path, args)
+    stage_4_launch_digital_twin()
 
 
 if __name__ == "__main__":

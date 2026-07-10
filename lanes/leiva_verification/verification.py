@@ -134,6 +134,21 @@ LOCAL_CUSUM_THRESHOLD   = 2.0
 RAW_DRIFT_WINDOW_SIZE = 30
 RAW_DRIFT_THRESHOLD = 0.6
 
+# ENF baseline comparison -- added 2026-07. ENF ONLY, not NLR/GPU/CPU --
+# deliberately scoped to the one signal where an untampered reference
+# is a natural, already-available byproduct of this pipeline (Stage 1's
+# smoothed ENF, held before attack injection ever touches it -- same
+# "clean upstream of the attacker" principle already used for
+# combined_smooth() itself). Validated against real data: a genuine
+# splice (even the shortest tested, 1 sample/2 seconds) produced a
+# minimum 0.032 Hz deviation from the true baseline value at that
+# timestamp; completely untampered data showed exactly 0.0 deviation.
+# attack.py rounds FRQ to 4 decimals before writing output, which
+# introduces up to ~0.00005 Hz of rounding noise on genuinely clean
+# windows -- ENF_BASELINE_THRESHOLD is set well above that and well
+# below the smallest real attack deviation measured.
+ENF_BASELINE_THRESHOLD = 0.01
+
 # ---------------------------------------------------------------------------
 # Tunable thresholds -- NLR side
 # TODO: run nlr_profile.py across all five workload modes and update.
@@ -520,6 +535,59 @@ class _RawDriftCheck:
         return True, "ok"
 
 
+class _ENFBaselineCheck:
+    """
+    ENF ONLY -- not used for NLR/GPU/CPU data at all.
+
+    Directly compares the observed FRQ value against an untampered
+    baseline ENF array at the exact same index/timestamp. This is
+    fundamentally different from every other check in this file: those
+    are all self-referential (comparing the signal to itself, with no
+    access to ground truth), which is exactly why quick same-file
+    splices were the one attack category nothing else could reliably
+    catch all session -- a spliced value is genuinely real, just from
+    the wrong moment, and looks statistically normal in isolation.
+    A direct baseline comparison sidesteps that completely: it doesn't
+    matter how "real" a value looks if it doesn't match what was
+    actually there at this specific timestamp.
+
+    The baseline must come from data captured/held BEFORE any attack
+    injection -- same principle as combined_smooth() needing to run
+    upstream of attack.py. Passing an attacked or partially-attacked
+    array as the baseline defeats the entire point.
+
+    threshold=0.01 (see ENF_BASELINE_THRESHOLD) is well above the
+    ~0.00005 Hz rounding noise attack.py's own JSON output introduces
+    on genuinely clean windows, and well below the smallest real
+    attack deviation measured (0.032 Hz, for the shortest tested
+    splice).
+    """
+
+    def __init__(
+        self,
+        baseline: list,
+        threshold: float = ENF_BASELINE_THRESHOLD,
+    ):
+        self._baseline = baseline
+        self._threshold = threshold
+
+    def check(self, index: int, observed_freq: float) -> tuple[bool, str]:
+        if index < 0 or index >= len(self._baseline):
+            # Out of range of the baseline we were given -- can't compare,
+            # don't penalize for something we have no reference for.
+            return True, "ok"
+        expected = self._baseline[index]
+        diff = abs(observed_freq - expected)
+        if diff > self._threshold:
+            return False, (
+                f"BASELINE MISMATCH: observed {observed_freq:.4f} Hz differs "
+                f"from the untampered reference ({expected:.4f} Hz) by "
+                f"{diff:.4f} Hz at this exact timestamp -- real ENF, "
+                f"unmodified, would match here"
+            )
+        return True, "ok"
+
+
 class _NLRRangeCheck:
     """
     Confirms GPU and CPU power readings are physically plausible.
@@ -615,17 +683,47 @@ class _NLRContinuityCheck:
 class _NLRMonotonicityCheck:
     """
     Confirms CPU energy counters (uJ) behave like a real hardware
-    energy counter in BOTH directions:
-      - may only decrease via a known RAPL wraparound (~65.5B uJ drop)
-        -- any other decrease is a rollback attack, hiding real energy use
-      - may not increase by more than CPU_UJ_MAX_STEP_UJ in one window
-        (PLACEHOLDER, derived from CPU_POWER_CEILING_W -- not yet
-        profiled against real data) -- an implausibly large increase
-        that stayed "monotonic" would previously have passed unnoticed
+    energy counter in BOTH directions.
+
+    DECREASE direction -- tracks a RUNNING MAXIMUM per channel, not
+    just the immediately preceding value. Added 2026-07 after finding
+    prev-only comparison could only catch the exact moment a tampered
+    reading first dropped below the true trajectory, not the full
+    duration it stayed dropped -- validated against a real ground-
+    truth attack (same-node value replay, ~260-270 billion uJ drop for
+    270 windows): prev-only comparison caught 3/270 (only the moments
+    a replay cycle happened to restart); running-max comparison
+    catches all 270/270. A cumulative energy counter can only
+    legitimately go backward via the known hardware wraparound; any
+    other drop below the highest legitimately-observed value is
+    tampering, for as long as it stays below that high-water mark --
+    not just on the first window it happens. Recovery is close to
+    immediate once the real counter naturally exceeds the frozen
+    running max again -- the real counter keeps accumulating in the
+    background regardless of what's being reported, so the moment
+    tampering stops, the true value is almost always already higher
+    than wherever the running max got frozen. No explicit recovery
+    mechanism needed here, unlike LocalCUSUMDetector's confidence-
+    based checks.
+
+    INCREASE direction -- measured against the immediately preceding
+    ACTUAL reading (not the running max, which can be stale during an
+    ongoing drop) so a genuine single-window step size is what's being
+    judged, not a distance from a frozen historical reference.
+    PLACEHOLDER threshold, not yet profiled against real data -- an
+    implausibly large increase that stayed "monotonic" would otherwise
+    pass unnoticed. Note the transition window right as a genuine
+    attack ends can itself trip this (jumping from a tampered low
+    reading back to the true, much higher trajectory looks like a
+    large single-window step) -- that's a real, defensible catch in
+    its own right, not a false positive to suppress; it just means
+    full recovery to TRUSTED lands one window after the attack
+    actually ends, not on the exact same window.
     """
 
     def __init__(self):
         self._prev: dict[str, float] = {}
+        self._running_max: dict[str, float] = {}
 
     def check(self, record: dict) -> dict[str, tuple[str, str]]:
         channels = _find_nlr_keys(record)
@@ -636,38 +734,55 @@ class _NLRMonotonicityCheck:
             if val is None:
                 continue
             prev = self._prev.get(key)
+            running_max = self._running_max.get(key)
 
             if prev is None:
                 results[key] = (_TRUSTED, "ok")
-            elif val < prev:
-                drop = prev - val
-                is_expected_wrap = abs(drop - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
+                self._prev[key] = val
+                self._running_max[key] = val
+                continue
+
+            if val < running_max:
+                drop_from_prev = prev - val
+                is_expected_wrap = (
+                    drop_from_prev > 0
+                    and abs(drop_from_prev - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
+                )
                 if is_expected_wrap:
                     results[key] = (_TRUSTED, "ok")
+                    self._running_max[key] = val  # new post-wrap epoch
                 else:
                     results[key] = (_FAILED, (
-                        f"MONOTONICITY VIOLATION: {key} decreased by "
-                        f"{drop:.1f} uJ -- not consistent with known hardware "
-                        f"wrap (~{CPU_UJ_WRAP_CEILING:.0f} uJ). "
-                        f"Counter should only increase or wrap."
+                        f"MONOTONICITY VIOLATION: {key}={val:.1f} uJ is "
+                        f"{running_max - val:.1f} uJ below the highest "
+                        f"legitimately observed value ({running_max:.1f} uJ) "
+                        f"-- not consistent with known hardware wrap "
+                        f"(~{CPU_UJ_WRAP_CEILING:.0f} uJ). Stays flagged "
+                        f"until a reading naturally exceeds this high-water "
+                        f"mark again."
                     ))
+                    # running_max deliberately NOT updated here -- keeps
+                    # every subsequent still-low reading caught too, not
+                    # just this one.
+                self._prev[key] = val
             else:
-                increase = val - prev
-                if increase > CPU_UJ_MAX_STEP_UJ:
+                step = val - prev
+                if step > CPU_UJ_MAX_STEP_UJ:
                     results[key] = (_FAILED, (
-                        f"ENERGY SPIKE: {key} increased by {increase:.1f} uJ "
+                        f"ENERGY SPIKE: {key} increased by {step:.1f} uJ "
                         f"in one window, exceeds plausibility ceiling "
                         f"{CPU_UJ_MAX_STEP_UJ:.1f} uJ (PLACEHOLDER threshold)"
                     ))
                 else:
                     results[key] = (_TRUSTED, "ok")
-
-            self._prev[key] = val
+                self._prev[key] = val
+                self._running_max[key] = val
 
         return results
 
     def reset(self) -> None:
         self._prev.clear()
+        self._running_max.clear()
 
 
 class _GPUTempRangeCheck:
@@ -903,6 +1018,12 @@ class Verifier:
     check_nlr : bool
         Whether to run the NLR/GPU-temp checks. Default True.
         Set False for ENF-only testing.
+    enf_baseline : list[float], optional
+        Untampered reference ENF values, ENF ONLY -- see
+        _ENFBaselineCheck's docstring. Must come from data held before
+        any attack injection touched it. If not provided, the baseline
+        comparison simply doesn't run -- fully backward compatible with
+        every existing caller that doesn't have a baseline available.
     """
 
     def __init__(
@@ -911,6 +1032,7 @@ class Verifier:
         warmup_windows: int = 10,
         strict_ordering: bool = True,
         check_nlr: bool = True,
+        enf_baseline: list = None,
     ):
         self._component_id = component_id
         self._warmup_windows = warmup_windows
@@ -924,6 +1046,7 @@ class Verifier:
         self._drift_monitor       = _DriftMonitor()
         self._local_cusum         = _LocalCUSUMDetector()
         self._raw_drift_check     = _RawDriftCheck()
+        self._baseline_check      = _ENFBaselineCheck(enf_baseline) if enf_baseline is not None else None
 
         # NLR checks -- multi-node aware, no configuration needed
         self._nlr_range_check        = _NLRRangeCheck()
@@ -998,6 +1121,21 @@ class Verifier:
             if not passed:
                 enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
                 enf_reasons.append(reason)
+
+            # Direct comparison against an untampered reference, ENF
+            # only -- see _ENFBaselineCheck's docstring. Only runs if a
+            # baseline was actually provided to this Verifier.
+            if self._baseline_check is not None:
+                index = None
+                if isinstance(sample, dict):
+                    index = sample.get("index")
+                else:
+                    index = getattr(sample, "index", None)
+                if index is not None:
+                    passed, reason = self._baseline_check.check(index, raw_freq)
+                    if not passed:
+                        enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+                        enf_reasons.append(reason)
 
         passed, reason = self._range_check.check(anchor.signature)
         if not passed:

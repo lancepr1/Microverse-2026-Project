@@ -49,6 +49,39 @@ def set_state(obj_name: str, var: StateVariable) -> None:
         obj["mv_workload_class"] = var.workload_class
 
 
+# Verification status color mapping. 0.0/0.5/1.0 = trusted/suspect/failed,
+# matching the numeric encoding used throughout the verification pipeline.
+STATUS_COLORS = {
+    0.0: (0.0, 1.0, 0.0, 1.0),   # trusted -> green
+    0.5: (1.0, 1.0, 0.0, 1.0),   # suspect -> yellow
+    1.0: (1.0, 0.0, 0.0, 1.0),   # failed  -> red
+}
+_STATUS_FALLBACK_COLOR = (0.5, 0.5, 0.5, 1.0)  # unexpected value -> gray, not silently wrong
+
+
+def set_status_color(obj_name: str, status: float) -> None:
+    """
+    Sets an object's built-in Viewport Display Color (obj.color) based on a
+    verification status value. Uses Blender's native per-object color
+    property rather than touching materials directly -- visible immediately
+    under "Object Color" viewport shading with no extra setup required, and
+    any material can optionally read it later via an Object Info node if
+    finer control is wanted.
+
+    Also writes the raw numeric status as a normal state variable (via
+    set_state, same as every other twin property) so it stays queryable/
+    loggable, not just visually represented.
+    """
+    obj = get_object(obj_name)
+    obj.color = STATUS_COLORS.get(status, _STATUS_FALLBACK_COLOR)
+    set_state(obj_name, StateVariable(
+        name="verification_status",
+        value=status,
+        unit="status",
+        source_object=obj_name,
+    ))
+
+
 def get_state(obj_name: str, var_name: str) -> StateVariable:
     obj = get_object(obj_name)
     key = f"mv_{var_name}"
