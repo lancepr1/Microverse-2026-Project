@@ -2,8 +2,8 @@
 ui/alert_log.py — the Alert log tab: a chronological alert timeline
 (Section 1) and a 16-node anomaly summary table (Section 2), both sourced
 from alert_log.py's session bookkeeping. See that module's docstring for
-why alert_type, prediction, and the capture-analysis note are placeholders
-rather than live-computed values.
+why alert_type and prediction are placeholders rather than live-computed
+values.
 
 The single render callback below is driven by operator-state-store (the
 same multi-node poll data ui/operator.py's Operator tab uses), not by
@@ -19,8 +19,6 @@ from dash import html, callback, Input, Output, no_update
 import alert_log
 from data_feed import list_node_ids
 from ui.operator import get_rack_groups
-
-CAPTURE_ANALYSIS_PLACEHOLDER = "Pending capture analysis"
 
 
 def build_alert_log_tab() -> html.Div:
@@ -71,7 +69,6 @@ def render_anomaly_log() -> html.Table:
     header = html.Tr([
         html.Th("Node"), html.Th("Rack"), html.Th("Current Score"),
         html.Th("Max Score"), html.Th("Alert Count"), html.Th("Last Alert"),
-        html.Th("Last Type"), html.Th("Capture Analysis"),
     ])
     body_rows = []
     for node_id in node_ids:
@@ -87,8 +84,6 @@ def render_anomaly_log() -> html.Table:
             html.Td(f"{max_score:.2f}" if max_score is not None else "--"),
             html.Td(str(s.get("alert_count", 0))),
             html.Td(datetime.fromtimestamp(last_at).strftime("%H:%M:%S") if last_at else "--"),
-            html.Td(s.get("last_alert_type", "--")),
-            html.Td(CAPTURE_ANALYSIS_PLACEHOLDER, className="dimmed-block"),
         ]))
 
     return html.Table([html.Thead(header), html.Tbody(body_rows)], className="alert-table")

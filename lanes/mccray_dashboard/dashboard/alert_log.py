@@ -24,7 +24,7 @@ MAX_TIMELINE_ENTRIES = 500
 _ALERT_STATUSES = ("suspect", "warning")
 
 _timeline = []    # alert-entry dicts, oldest first
-_node_stats = {}  # node_id -> {current_score, max_score, alert_count, last_alert_at, last_alert_type}
+_node_stats = {}  # node_id -> {current_score, max_score, alert_count, last_alert_at}
 
 
 def reset() -> None:
@@ -42,7 +42,7 @@ def record_poll(state: dict) -> None:
 
         stats = _node_stats.setdefault(node_id, {
             "current_score": None, "max_score": None, "alert_count": 0,
-            "last_alert_at": None, "last_alert_type": "--",
+            "last_alert_at": None,
         })
         stats["current_score"] = score
         if score is not None:
@@ -53,7 +53,6 @@ def record_poll(state: dict) -> None:
         if status in _ALERT_STATUSES:
             stats["alert_count"] += 1
             stats["last_alert_at"] = now
-            stats["last_alert_type"] = "--"
 
             _timeline.append({
                 "timestamp": now,
