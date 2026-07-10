@@ -283,6 +283,14 @@ def stage_1_ingest_and_smooth(args) -> Path:
     enf = load_enf(args.enf_path)
     enf = combined_smooth(enf)
 
+    # Held here, before attack injection ever runs, as the untampered
+    # reference for _ENFBaselineCheck in stage_3 -- same "clean
+    # upstream of the attacker" principle as combined_smooth() itself.
+    # This exact array, not a re-derived or re-loaded copy, is what
+    # gets compared against later -- guarantees it was never anywhere
+    # near attack.py.
+    args.enf_baseline = list(enf)
+
     print(f"[1/4] Discovering NLR pairs in {args.nlr_folder} "
           f"(workload_type={args.workload_type}) ...")
     slurm_id = args.slurm_id if args.workload_type == "training" else None
@@ -424,13 +432,31 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
 
 def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     """
-    Runs verification (same logic as verify_file.py -- 0.0=trusted,
-    0.5=suspect, 1.0=failed, worst-of across every component checked
-    each window) and writes the result DIRECTLY to all three
-    destinations in one pass -- no "anchor_verified.jsonl"
-    intermediate file, since all three destinations were always going
-    to be identical copies of it anyway. Writing three file handles
-    at once instead of writing once then copying twice.
+    Runs verification and writes the result DIRECTLY to all three
+    destinations in one pass -- no "anchor_verified.jsonl" intermediate
+    file, since all three destinations were always going to be
+    identical copies of it anyway.
+
+    OUTPUT COLUMNS (2026-07 redesign, replacing the old single
+    catch-all "status" field): no overall summary field anymore.
+    Instead:
+        ENF_status              -- worst-of every ENF-related check
+                                    (confidence, drift, raw-value
+                                    trend, and the new baseline
+                                    comparison)
+        {node_id}_status         -- one per node ACTUALLY PRESENT in
+                                    this run's data, worst-of just that
+                                    node's own metrics (GPU watts/temps,
+                                    CPU watts/energy). Variable count --
+                                    a 1-node run gets 1 column, a
+                                    16-node run gets 16, driven by the
+                                    real data, never hardcoded.
+    All values use the same 0.0/0.5/1.0 (trusted/suspect/failed)
+    encoding as before. Node ID is parsed from each result's
+    component_id using the same convention attack.py's own
+    scan_telemetry_schema() uses (split on "_gpu"/"_cpu") -- kept
+    consistent with the rest of the project rather than inventing a
+    new parsing rule.
 
     PLACEHOLDER destinations -- currently just three real files with
     identical content:
@@ -453,10 +479,35 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     records = list(read_combined_jsonl(str(attacked_path)))
     enf_list = [r["FRQ"] for r in records]
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
-    verifier = Verifier(component_id=args.component_id, warmup_windows=10, check_nlr=True)
+    verifier = Verifier(
+        component_id=args.component_id,
+        warmup_windows=10,
+        check_nlr=True,
+        enf_baseline=getattr(args, "enf_baseline", None),
+    )
 
     STATUS_RANK = {"trusted": 0, "suspect": 1, "failed": 2}
     STATUS_SCORE = {"trusted": 0.0, "suspect": 0.5, "failed": 1.0}
+
+    def node_id_of(component_id: str) -> str:
+        """Strips the leading 'rack_00/' prefix, then extracts the node
+        ID the same way attack.py's scan_telemetry_schema() does."""
+        name = component_id.split("/", 1)[-1]
+        if "_gpu" in name:
+            return name.split("_gpu")[0]
+        if "_cpu" in name:
+            return name.split("_cpu")[0]
+        return None  # ENF, or anything else not tied to a specific node
+
+    # Determine which nodes are actually present ONCE, from the first
+    # record's own field names -- fixed for the whole run, so every
+    # output record gets exactly the same set of columns.
+    sample_keys = [k for k in records[0].keys() if k not in ("index", "FRQ", "timestamp")]
+    node_ids = sorted({
+        (k.split("_gpu")[0] if "_gpu" in k else k.split("_cpu")[0])
+        for k in sample_keys if "_gpu" in k or "_cpu" in k
+    })
+    print(f"[3/4] {len(node_ids)} node column(s): {node_ids}")
 
     out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -477,11 +528,21 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
             anchor = extractor.extract(record["timestamp"])
             results = verifier.verify(record, anchor)
 
-            worst = "trusted"
+            enf_status = "trusted"
+            node_status = {nid: "trusted" for nid in node_ids}
+
             for result in results:
-                if STATUS_RANK[result.status] > STATUS_RANK[worst]:
-                    worst = result.status
-            scoreboard_record["status"] = STATUS_SCORE[worst]
+                nid = node_id_of(result.component_id)
+                if nid is None:
+                    if STATUS_RANK[result.status] > STATUS_RANK[enf_status]:
+                        enf_status = result.status
+                elif nid in node_status:
+                    if STATUS_RANK[result.status] > STATUS_RANK[node_status[nid]]:
+                        node_status[nid] = result.status
+
+            scoreboard_record["ENF_status"] = STATUS_SCORE[enf_status]
+            for nid in node_ids:
+                scoreboard_record[f"{nid}_status"] = STATUS_SCORE[node_status[nid]]
 
             line = json.dumps(scoreboard_record) + "\n"
             for fh in handles.values():
