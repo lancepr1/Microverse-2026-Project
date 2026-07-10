@@ -1,12 +1,12 @@
 """
-history_store.py — a local SQLite log of the raw telemetry fields already
-shown on the rack card (see ui/rack_cards.py), one row per replayed
-sample.
+history_store.py — a local SQLite log of the single-node legacy feed's raw
+telemetry fields (see data_feed.py's single-node get_rack_id()/poll()
+API), one row per replayed sample.
 
 This is pure storage: every field written here already flows through
-data_feed.poll() and is already displayed elsewhere in the dashboard.
-Nothing in this module computes a score, verdict, or alert — see README
-"Known gaps" for why that distinction matters in this repo.
+data_feed.poll(). Nothing in this module computes a score, verdict, or
+alert — see README "Known gaps" for why that distinction matters in this
+repo.
 """
 import os
 import sqlite3

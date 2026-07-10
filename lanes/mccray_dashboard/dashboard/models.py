@@ -95,3 +95,17 @@ class TelemetrySample:
     @classmethod
     def from_json_line(cls, line: str) -> "TelemetrySample":
         return cls.from_dict(json.loads(line))
+
+    @classmethod
+    def from_dashboard_row(cls, node_id: str, row: dict) -> "TelemetrySample":
+        """Build one node's sample out of a for_dashboard.jsonl row, which
+        packs every node into a single wide record with node-prefixed keys
+        (e.g. "node00_gpu-0[W]") instead of one file per node. Strips the
+        prefix and reuses from_dict()'s existing key parsing."""
+        prefix = f"{node_id}_"
+        stripped = {
+            key[len(prefix):]: value for key, value in row.items() if key.startswith(prefix)
+        }
+        stripped["index"] = row.get("index", 0)
+        stripped["FRQ"] = row["FRQ"]
+        return cls.from_dict(stripped)

@@ -19,26 +19,18 @@ def test_data_feed_imports_and_exposes_poll():
     assert callable(data_feed.poll)
 
 
-def test_ui_rack_cards_imports():
-    from ui.rack_cards import status_color, render_rack_card, render_detail_panel
-    assert status_color("anything") == "rgb(90, 90, 90)"
-    assert render_rack_card({}) is not None
-    assert render_detail_panel({}) is not None
-
-
 def test_ui_charts_imports():
-    from ui.charts import update_charts, reset_charts, build_figures, get_figures
-    assert callable(update_charts)
-    assert callable(reset_charts)
-    assert len(build_figures()) == 2
-    assert len(get_figures()) == 2
+    from ui.charts import update_node_history, build_rack_power_figure, get_node_history_lengths
+    assert callable(update_node_history)
+    assert callable(get_node_history_lengths)
+    fig = build_rack_power_figure(["node-a", "node-b"])
+    assert len(fig.data) == 2
 
 
 def test_ui_controls_imports():
-    from ui.controls import build_controls, DEFAULT_CONTROLS
+    from ui.controls import build_chart_controls, DEFAULT_CONTROLS
     assert DEFAULT_CONTROLS["time_range"] == "10 Sec"
-    assert DEFAULT_CONTROLS["facility"] == "Inference"
-    assert build_controls() is not None
+    assert build_chart_controls() is not None
 
 
 def test_no_microverse_core_dependency_anywhere():
