@@ -300,8 +300,38 @@ class RealTimeSimulationRunner:
             if area.type == 'VIEWPORT_3D':
                 area.tag_redraw()
 
+        # Feeds the dashboard's "Live Digital Twin" panel -- see
+        # _capture_viewport()'s docstring for why this exact path.
+        _capture_viewport()
+
         self.step += 1
         return 2.0
+
+
+def _capture_viewport(filepath="/tmp/blender_viewport.png"):
+    """
+    Grabs a fast OpenGL capture of the 3D viewport and writes it to disk
+    as a PNG -- this exact path is what the dashboard's
+    lanes/mccray_dashboard/dashboard/ui/blender_feed.py panel polls
+    (mtime-based) to show a "Live Digital Twin" preview. Uses
+    render.opengl (a viewport snapshot) rather than a full render --
+    cheap enough to call every simulation tick.
+    """
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        scene = bpy.context.scene
+                        scene.render.image_settings.file_format = 'PNG'
+                        scene.render.filepath = filepath
+                        with bpy.context.temp_override(window=window, area=area, region=region):
+                            # view_context=True captures what's actually
+                            # visible in the viewport (current camera
+                            # angle/zoom), not the scene's render camera.
+                            bpy.ops.render.opengl(write_still=True, view_context=True)
+                        return
+    print("⚠️ No VIEW_3D area found -- skipping viewport capture for this tick.")
 
 
 # Initialize layout link using your pre-existing environment file structure
