@@ -9,15 +9,11 @@ no rack field in the recordings themselves yet (see data/README.md) --
 this grouping is a placeholder subject to change once Leiva/the facility
 team finalizes real rack assignments.
 
-Node-card/rack-card border colors and the detail panel's status badge are
-driven by Leiva's real-time verification status (good/suspect/warning),
-the only live per-node state signal that exists in this repo today. The
-node card's "forecast" badge reuses that same status as an interim stand-in
-(good->Normal, suspect->Warning, warning->Alert) -- there is no RNN
-forecast model in this repo, so no "Breach ~Xs" countdown is fabricated.
-The detail panel's 30-Second Forecast, Weakpoint RNN, and AI Explanation
-sections are all labeled placeholders for the same reason: none of that
-model inference exists yet, and building it is out of scope here.
+Node-card/rack-card border colors, the node card's status badge, and the
+detail panel's status badge are all driven by Leiva's real-time
+verification status (good/suspect/warning) -- the only live per-node state
+signal that exists in this repo today (good->Normal, suspect->Warning,
+warning->Alert).
 
 The 16 node-card buttons and 4 rack cards are built ONCE, in
 build_operator_tab(), and never replaced afterward. Earlier this module
@@ -228,23 +224,6 @@ def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
         html.Hr(),
         _detail_row("Power Draw", power_text),
         _detail_row("GPU Temp", temp_text),
-
-        html.Div("30-Second Forecast", className="section-title"),
-        html.Hr(),
-        _detail_row("Predicted Power", "--"),
-        _detail_row("Predicted State", "--"),
-        _anomaly_score_bar(None),
-        html.Div("Pending model integration", className="dimmed-block"),
-
-        html.Div("Weakpoint RNN", className="section-title"),
-        html.Hr(),
-        _detail_row("Next Event Type", "--"),
-        _detail_row("Time to Next Event", "--"),
-
-        html.Div("AI Explanation", className="section-title ai-label"),
-        html.Hr(),
-        html.Div("AI explanation — pending model integration",
-                  className="dimmed-block ai-explanation-box"),
     ])
 
 
@@ -259,25 +238,6 @@ def _detail_row(label, value, color=COLOR_TEXT):
     return html.Div(className="row", children=[
         html.Span(f"{label}:", className="label"),
         html.Span(value, className="mono-value", style={"color": color}),
-    ])
-
-
-def _anomaly_score_bar(score):
-    """Placeholder fill bar -- no anomaly-scoring model exists yet, so this
-    always renders empty/"--" until a later session wires it up. Thresholds
-    match the spec (green <0.5, amber 0.5-1.0, red >1.0) for when it is."""
-    pct, color, label = 0, COLOR_DEFAULT, "--"
-    if score is not None:
-        label = f"{score:.2f}"
-        color = COLOR_NOMINAL if score < 0.5 else COLOR_WARNING if score <= 1.0 else COLOR_ALERT
-        pct = min(score / 1.5, 1.0) * 100
-
-    return html.Div(className="row", children=[
-        html.Span("Anomaly Score:", className="label"),
-        html.Div(className="score-bar-track", children=[
-            html.Div(className="score-bar-fill", style={"width": f"{pct}%", "background": color}),
-        ]),
-        html.Span(label, className="mono-value"),
     ])
 
 
@@ -319,11 +279,11 @@ def _on_node_card_data_update(state, status_filter, btn_id):
     power  = data.get("total_power_w")
     temp   = data.get("average_gpu_temp_c")
 
-    power_text    = f"{power:.1f} W" if power is not None else "-- W"
-    temp_text     = f"{temp:.1f} °C" if temp is not None else "-- °C"
-    forecast_text = _STATUS_TO_BADGE.get(status, "--")
-    border_color  = _STATUS_TO_BORDER.get(status, COLOR_DEFAULT)
-    badge_style   = _STATUS_BADGE_STYLE.get(status, _DEFAULT_BADGE_STYLE)
+    power_text   = f"{power:.1f} W" if power is not None else "-- W"
+    temp_text    = f"{temp:.1f} °C" if temp is not None else "-- °C"
+    badge_text   = _STATUS_TO_BADGE.get(status, "--")
+    border_color = _STATUS_TO_BORDER.get(status, COLOR_DEFAULT)
+    badge_style  = _STATUS_BADGE_STYLE.get(status, _DEFAULT_BADGE_STYLE)
 
     dimmed = bool(status_filter) and status_filter != "all" and status_filter != status
     btn_style = {"borderColor": border_color, "opacity": 0.3 if dimmed else 1}
@@ -331,7 +291,7 @@ def _on_node_card_data_update(state, status_filter, btn_id):
     return (
         power_text,
         temp_text,
-        forecast_text,
+        badge_text,
         badge_style,
         btn_style,
     )

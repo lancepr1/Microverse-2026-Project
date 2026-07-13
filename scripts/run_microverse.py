@@ -390,8 +390,8 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     attack_{id}.jsonl (no ground truth) AND attack_{id}_check.jsonl
     (same data, plus a 0/1 "attack" ground-truth column). {id} varies
     by which scenario got selected (interactively, or randomly for
-    medium/hard preset scenarios) -- genuinely unpredictable in
-    advance, so found via before/after directory diffing (globbing
+    medium/hard preset scenarios) -- not knowable in advance, so
+    found via before/after directory diffing (globbing
     specifically on "attack_*_check.jsonl" -- the broader
     "attack_*.jsonl" would match both files written each run and
     incorrectly trigger the "multiple new files" ambiguity path every

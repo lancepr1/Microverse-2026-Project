@@ -15,7 +15,6 @@ def _row(node_id, severity, start_ts, end_ts=None, rack="Rack 1", sample_count=1
         "average_gpu_temp_c": average_gpu_temp_c,
         "rack": rack,
         "ongoing": ongoing,
-        "prediction": "No prediction",
     }
 
 

@@ -35,7 +35,12 @@ def build_chart_controls() -> html.Div:
             for label in TIME_RANGES
         ]),
 
-        html.Button("Live", id="live-toggle-btn", n_clicks=0, className="btn"),
+        html.Button(
+            "Follow: On", id="live-toggle-btn", n_clicks=0, className="btn",
+            title="X-axis auto-follow. Off = the window stops sliding so you "
+                  "can pan/zoom freely; data keeps flowing. To freeze the "
+                  "charts entirely, use ⏸ Pause.",
+        ),
     ])
 
 
@@ -60,12 +65,14 @@ def _on_control_click(_time_clicks, _live_clicks, store):
     charts.set_time_range(store["time_range"])
     charts.set_auto_follow(store["auto_follow"])
 
-    return store, ("Live" if store["auto_follow"] else "Paused")
+    return store, ("Follow: On" if store["auto_follow"] else "Follow: Off")
 
 
-# Note: "Live"/"Paused" above toggles auto_follow -- whether the x-axis
+# Note: "Follow: On/Off" above toggles auto_follow -- whether the x-axis
 # keeps sliding with the selected Time Range window, or sits unwindowed so
 # Plotly's own pan/zoom sticks. That's a different axis from
 # ui/analyst.py's "⏸ Pause"/"▶ Resume" button, which freezes the whole
 # Analyst tab (buffer growth and all eight figures) regardless of the
-# Time Range or auto_follow state.
+# Time Range or auto_follow state. It used to read "Live"/"Paused", which
+# made it look like a second pause button next to ⏸ Pause -- it never
+# paused data, only the sliding window.
