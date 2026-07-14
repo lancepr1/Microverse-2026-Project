@@ -71,6 +71,42 @@ def normalize(input_path: Path, output_path: Path) -> dict[str, str]:
     return rename
 
 
+def normalize_verification_component_ids(rename: dict[str, str], verification_path: Path) -> int:
+    """Rewrites runs/<component_id>/verification.jsonl in place so each
+    VerificationResult's component_id (e.g. "rack_00/x3105c0s37b0n0_gpu-0[W]")
+    uses the same node00..nodeNN naming normalize() just applied to
+    for_dashboard.jsonl -- using the exact same rename mapping, so the two
+    files agree on node identity and the dashboard's per-node status lookup
+    (verification_feed.verify_sample()'s node_id filter) actually matches.
+    Records with no node-id segment (e.g. the shared "<component_id>/ENF"
+    facility-wide check) are left untouched. Returns how many records were
+    rewritten; 0 (no-op) if the file doesn't exist yet or rename is empty."""
+    if not rename or not verification_path.exists():
+        return 0
+
+    lines = []
+    changed = 0
+    with open(verification_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            component_id = record["data"]["component_id"]
+            prefix, sep, suffix = component_id.partition("/")
+            for raw_id, node_id in rename.items():
+                if suffix.startswith(raw_id + "_"):
+                    record["data"]["component_id"] = f"{prefix}{sep}{node_id}{suffix[len(raw_id):]}"
+                    changed += 1
+                    break
+            lines.append(json.dumps(record))
+
+    with open(verification_path, "w") as f:
+        for line in lines:
+            f.write(line + "\n")
+    return changed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Rewrite a combined-format JSONL file so node-prefixed "

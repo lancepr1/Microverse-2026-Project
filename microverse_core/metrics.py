@@ -235,8 +235,8 @@ def main():
         sys.exit(1)
 
     ground_truth_attack = []
-    strict_predictions = []
-    lenient_predictions = []
+    strict_detections = []
+    lenient_detections = []
 
     for idx, (t_row, d_row) in enumerate(zip(truth_rows, detector_rows)):
         if t_row.get("index") != d_row.get("index"):
@@ -251,18 +251,18 @@ def main():
         ground_truth_attack.append(truth_val)
         
         # Mapping Binary Strict Target Layer
-        strict_predictions.append(1 if status_val == 1.0 else 0)
+        strict_detections.append(1 if status_val == 1.0 else 0)
         
         # Mapping Binary Lenient Target Layer
-        lenient_predictions.append(1 if status_val >= 0.5 else 0)
+        lenient_detections.append(1 if status_val >= 0.5 else 0)
 
     # Compute Statistical Metrics Profiles
-    strict_metrics = calculate_confusion_matrix(ground_truth_attack, strict_predictions)
-    lenient_metrics = calculate_confusion_matrix(ground_truth_attack, lenient_predictions)
+    strict_metrics = calculate_confusion_matrix(ground_truth_attack, strict_detections)
+    lenient_metrics = calculate_confusion_matrix(ground_truth_attack, lenient_detections)
 
     # Compute Latency Metrics Profiles
-    strict_ttd_profile = calculate_time_to_detection(ground_truth_attack, strict_predictions)
-    lenient_ttd_profile = calculate_time_to_detection(ground_truth_attack, lenient_predictions)
+    strict_ttd_profile = calculate_time_to_detection(ground_truth_attack, strict_detections)
+    lenient_ttd_profile = calculate_time_to_detection(ground_truth_attack, lenient_detections)
 
     # Render Results Dashboard Panel
     print_evaluation_dashboard(

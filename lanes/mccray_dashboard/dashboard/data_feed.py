@@ -36,6 +36,14 @@ DASHBOARD_JSONL = os.path.join(
 )
 REPLAY_INTERVAL_S = 1.0  # one recorded sample is "emitted" per second of replay
 
+# scripts/run_microverse.py's Component ID prompt defaults to "rack_00" and
+# writes runs/<component_id>/verification.jsonl under that name -- this has
+# to match whatever was actually entered at the prompt for verification
+# status to show up. There's currently no field in DASHBOARD_JSONL itself
+# that records which component_id produced it, so this is a convention, not
+# a discovery.
+DEFAULT_COMPONENT_ID = "rack_00"
+
 _samples = []
 _cursor = [0]
 _t0 = [0.0]
@@ -153,7 +161,7 @@ def init_multi_feed() -> None:
         _multi_samples[node_id] = [
             TelemetrySample.from_dashboard_row(node_id, row) for row in rows
         ]
-        verification_feed.init_verifier(node_id)
+    verification_feed.init_verifier(DEFAULT_COMPONENT_ID)
 
     _multi_cursor[0] = 0
     _multi_t0[0] = time.time()
@@ -177,7 +185,9 @@ def poll_all() -> dict:
     for node_id, samples in _multi_samples.items():
         next_index = min(target_index, len(samples) - 1)
         sample = samples[next_index]
-        verification = verification_feed.verify_sample(sample.index, run_id=node_id)
+        verification = verification_feed.verify_sample(
+            sample.index, node_id=node_id, run_id=DEFAULT_COMPONENT_ID
+        )
         result[node_id] = _to_state(sample, verification)
 
     _multi_cursor[0] = target_index + 1
