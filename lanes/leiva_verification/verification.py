@@ -1,6 +1,6 @@
 """
 verification.py
----------------
+----------------
 Verifier: runs EVERY ENF and NLR check against EVERY component, every
 call, and returns a full list of per-component results. Nothing stops
 early. The job of this module is coverage and attribution -- test if
@@ -16,32 +16,76 @@ information along -- not to gate whether data keeps moving.
                                (flat or out-of-[0,1] shapes)
     4. ENFContinuityCheck     discontinuity defense (confidence hard threshold)
     5. DriftMonitor           slow drift defense (CUSUM across many windows)
-    All five always run. If more than one fires in the same window, the
-    merged ENF result reports the worst status and every reason that fired,
-    not just the first.
+    6. LocalCUSUMDetector     short-horizon CUSUM, sticky (doesn't self-reset)
+    7. RawDriftCheck          sustained directional trend on the raw value --
+                               catches gradual ramp attacks too slow for any
+                               single-window check to see
+    8. ENFAlternativeCorrelationCheck  windowed Pearson correlation against
+                               an independently-noised second ENF stream --
+                               simulates the two-sensor architecture the
+                               reference papers (ANCHOR-Grid, SAVE) actually
+                               use, generated in run_microverse.py's stage_1
+                               and held back from attack.py exactly like
+                               combined_smooth()'s own output is. Real,
+                               validated limitation: mathematically blind to
+                               a constant/slowly-varying offset (proved
+                               directly -- correlation is invariant to an
+                               additive shift), strong against replay-shaped
+                               tampering (~99% recall on real data) instead.
+                               See its own docstring and ENF_ALT_* constants
+                               for full calibration history.
+    All eight always run (#8 only if an alternative stream was provided).
+    If more than one fires in the same window, the merged ENF result
+    reports the worst status and every reason that fired, not just the
+    first.
 
   NLR side (multi-node aware -- one result per physical channel):
-    6. NLRRangeCheck           injection defense (impossible GPU/CPU wattage)
-    7. NLRContinuityCheck      discontinuity defense (sudden power jumps)
-    8. NLRMonotonicityCheck    tamper defense on CPU energy counters --
-                               checks BOTH directions: an illegitimate
-                               decrease (rollback, hiding real energy use)
-                               and an implausibly large increase (energy
-                               spike) that a decrease-only check would
-                               never catch.
-    9. GPUTempRangeCheck       NEW -- GPU temperature physical plausibility.
-                               Was previously discovered by _find_nlr_keys()
-                               but never actually checked by anything.
-   10. GPUTempContinuityCheck  NEW -- GPU temperature step-size plausibility.
+    9. NLRRangeCheck            injection defense (impossible GPU/CPU wattage)
+   10. NLRContinuityCheck       discontinuity defense (sudden power jumps)
+   11. NLRMonotonicityCheck     tamper defense on CPU energy counters --
+                                checks BOTH directions: an illegitimate
+                                decrease (rollback, hiding real energy use)
+                                and an implausibly large increase (energy
+                                spike) that a decrease-only check would
+                                never catch.
+   12. GPUTempRangeCheck        GPU temperature physical plausibility.
+   13. GPUTempContinuityCheck   GPU temperature step-size plausibility.
+   14. CrossSiblingConsistencyCheck  compares a channel against the median
+                                of its siblings on the SAME node -- GPUs
+                                (and, more weakly, CPUs) doing the same
+                                distributed job track each other tightly.
+                                Closes a real gap: a targeted, single-
+                                channel replay that leaves siblings
+                                untouched is invisible to range/step-size
+                                checks but breaks this correlation. No new
+                                data used -- only channels already present
+                                in the compressed record every consumer
+                                (including the digital twin) receives.
+   15. NLRSustainedDeviationCheck  GPU wattage/temperature only. Once a
+                                step exceeds the continuity threshold, the
+                                channel STAYS failed on every subsequent
+                                window -- not just the entry transition --
+                                until it genuinely returns within a
+                                recovery band of its pre-jump value.
+                                Closes the "boundary-only" gap continuity
+                                checks share: a sustained replay holding a
+                                fabricated value steady is otherwise
+                                invisible after its first window. Inactive
+                                during the documented startup-ramp window
+                                (see NLR_STARTUP_RAMP_WINDOWS) -- a
+                                legitimate ramp passes through several
+                                genuinely different stable levels, so
+                                "must return to the original reference" is
+                                the wrong test there.
     Every channel present in the record gets its own result, every call --
     a bad gpu-0[W] reading does not stop cpu-1[uJ] from being checked, and
-    if BOTH a range and a step-size problem hit the same channel in the
-    same window, they merge into one result naming both.
+    if multiple checks flag the same channel in the same window, they
+    merge into one result naming all of them.
 
-   11. Cross-node corroboration (_apply_synchronized_event_correlation)
-                               NEW -- runs after all NLR checks merge.
-                               A pure step-size (discontinuity) failure
-                               is downgraded from FAILED to SUSPECT when
+   16. Cross-node corroboration (_apply_synchronized_event_correlation)
+                               Runs after all NLR checks merge. A pure
+                               step-size (discontinuity) failure is
+                               downgraded from FAILED to SUSPECT when
                                enough OTHER independent nodes show the
                                same step on the same physical channel in
                                the same window -- real synchronized
@@ -52,7 +96,18 @@ information along -- not to gate whether data keeps moving.
                                other real nodes. Never downgrades a
                                channel that is ALSO out of range or
                                violating monotonicity -- corroboration
-                               only softens pure step-size calls.
+                               only softens pure step-size calls. Also
+                               requires the step stay within
+                               SYNC_EVENT_MAX_STEP_MULTIPLE of the
+                               threshold it crossed -- corroboration
+                               forgives a borderline step, not an
+                               extreme one (added after a real case
+                               slipped through: a confirmed 500-600W GPU
+                               wattage drop, hitting both nodes in a
+                               2-node deployment at once, was getting
+                               waved off purely on statistical agreement
+                               despite the magnitude alone being
+                               implausible as a real synchronized event).
 
 Status mapping (per metrics.py -- only FAILED counts as a detection):
   TRUSTED  passes cleanly (dashboard-facing label: "good")
@@ -65,17 +120,22 @@ before and metrics.py should keep working against them as-is -- the
 good/suspect/warning wording is a presentation-layer relabeling for
 the dashboard, not a change to what's stored or computed here.
 
-Thresholds at the top of this file are starting estimates. Two blocks
-are marked PLACEHOLDER below (GPU temperature, CPU energy upward-spike)
-because nothing has ever profiled real data for them -- treat any flag
-from those specific checks as provisional until they're calibrated the
-same way GPU_MAX_STEP_W etc. were.
+Most thresholds in this file have been calibrated against real data --
+see each constant's own comment for specifics (what was measured, what
+file, what the resulting FPR/recall was). The ones that remain genuine,
+undisguised placeholders: GPU_TEMP_FLOOR_C/GPU_TEMP_CEILING_C (physics-
+based reasoning, not real-data profiling) and CPU_UJ_MAX_STEP_UJ (a
+derived formula, not a profiled value). Everything else -- including
+GPU_MAX_STEP_W and GPU_TEMP_MAX_STEP_C, both recalibrated this session
+after being found to never fire once against real data -- has real
+measurement behind it.
 """
 
 from __future__ import annotations
 
 import collections
 import math
+import re
 import statistics
 from typing import Optional
 
@@ -135,6 +195,76 @@ RAW_DRIFT_WINDOW_SIZE = 30
 RAW_DRIFT_THRESHOLD = 0.6
 
 # ---------------------------------------------------------------------------
+# Independent-sensor simulation via correlation -- added 2026-07, at the
+# mentor's direction, to more faithfully match the reference papers'
+# actual architecture (independently-measured ENF, compared via
+# windowed Pearson correlation) rather than an exact-value diff against
+# the same clean copy. The held-back reference itself is legitimate for
+# the same reason the removed exact-value baseline check was: both come
+# from Stage 1, before any simulated attack touches the data -- the
+# difference is HOW the comparison is made, not whether holding a
+# reference at all is fair.
+#
+# The "alternative" ENF stream is generated by adding small,
+# independent Gaussian noise to the same clean smoothed signal --
+# NOT a time-delayed copy. Distance between two real grid-connected
+# sensors does not introduce a time lag the way sound or light would;
+# grid frequency is a shared electrical property that updates
+# essentially simultaneously across an entire synchronized
+# interconnect (the paper's own figure confirms this directly: two
+# real sensors 180 miles apart show correlation >0.95 at the SAME
+# timestamps, not a lagged match). What actually differs between two
+# real sensors is independent local measurement noise, not delay.
+#
+# RECALIBRATED (2026-07, second pass) from 0.001 to 0.0001. At the
+# original 0.001, windowed (40-sample) clean-data correlation had real
+# spread (median 0.999, P10 0.993) -- meaningful, but left recall on a
+# real replay attack capped around 88.6% even after retuning window
+# size and threshold. At 0.0001, clean-data correlation on real data
+# tightens dramatically (median 0.99999, min 0.99982 across the whole
+# file) -- tight enough to safely raise the threshold far higher (see
+# ENF_ALT_CORRELATION_THRESHOLD), which is what actually recovered the
+# rest of the gap. A tighter noise floor makes the alternative stream a
+# more faithful proxy for the true signal, giving the threshold more
+# room to move before natural noise risks a false positive.
+ENF_ALT_NOISE_STD = 0.0001
+
+ENF_ALT_WINDOW_SIZE = 40
+# See ENF_ALT_CORRELATION_THRESHOLD below for the full recalibration
+# history -- window size itself was swept once (5-90) during the first
+# pass and 40 held up as the elbow of that curve; unchanged since.
+ENF_ALT_CORRELATION_THRESHOLD = 0.999
+# RECALIBRATED (2026-07, second pass) from 0.90 to 0.999, alongside
+# tightening ENF_ALT_NOISE_STD (0.001 -> 0.0001) -- the two changes
+# were tested together, not independently. Real replay attack recall:
+# 60.2% (original 10-window/0.8) -> 88.6% (40-window/0.90, first pass)
+# -> 99.2% (893/900, this setting). False positives at this setting
+# (39/1800 on the attack file) remain FULLY explained, same as before:
+# every one falls within the 40-window recovery tail right after the
+# attack ends. The only 7 windows still missed sit at the very start of
+# the attack (indices 180-186) -- inherent detection latency, since the
+# rolling window needs 40 samples of history before correlation means
+# anything; not a threshold problem. Confirmed 0 false positives on a
+# fully independent clean file (different Dev/Hr, different noise
+# seed) at this exact setting.
+ENF_ALT_MIN_VARIANCE = 0.000005
+# Pearson correlation is numerically unstable when a window is nearly
+# flat -- confirmed directly: every real false positive found during
+# calibration (6/179 windows on clean data) occurred in a window with
+# local variance at or below ~2e-6, where independent noise dominates
+# an already-tiny signal and correlation swings wildly (observed as
+# low as 0.50) despite the two streams being essentially identical in
+# absolute terms. Windows below this variance are skipped entirely,
+# same "don't divide by near-zero" principle used elsewhere in this
+# file (e.g. the sibling consistency check's sibling_ref <= 1 guard).
+#
+# HONEST STARTING POINT, not a final answer: threshold and window size
+# taken directly from the papers and this initial calibration --
+# expected to need adjustment once tested against real attack
+# scenarios, per direct instruction not to over-invest before that
+# evaluation happens.
+
+# ---------------------------------------------------------------------------
 # Tunable thresholds -- NLR side
 # TODO: run nlr_profile.py across all five workload modes and update.
 # These placeholders come from the P99 step sizes observed in the two
@@ -143,7 +273,19 @@ RAW_DRIFT_THRESHOLD = 0.6
 
 GPU_POWER_CEILING_W = 800.0
 CPU_POWER_CEILING_W = 800.0
-GPU_MAX_STEP_W      = 470.0
+GPU_MAX_STEP_W      = 400.0     # RECALIBRATED (2026-07) from 470.0, which was
+                                 # never crossed once across 14,392 real step
+                                 # observations (run_2node.jsonl) -- same "never
+                                 # fires, zero real detection power" pattern
+                                 # already found and fixed for GPU_TEMP_MAX_STEP_C.
+                                 # Real max observed: 363.2W (startup-ramp zone,
+                                 # idx 141-142, same known volatile period
+                                 # documented elsewhere). Steady-state-only
+                                 # (idx>150) max: 272.1W, P99.9: 166.2W. 400.0
+                                 # sits with real margin (~10%) above the highest
+                                 # value ever observed in real data, including
+                                 # the volatile ramp period, while being
+                                 # meaningfully tighter than the old placeholder.
 CPU_MAX_STEP_W      = 16.0
 
 # RAPL energy counter hardware wraparound
@@ -161,6 +303,51 @@ GPU_TEMP_FLOOR_C    = 0.0    # a GPU under any load at/below 0C is a stuck/fabri
 GPU_TEMP_CEILING_C  = 95.0   # datacenter GPUs throttle/shutdown in the 83-95C range
 GPU_TEMP_MAX_STEP_C = 8.0    # RECALIBRATED (2026-07) from the original 15.0 placeholder, which was never once crossed across 14,400 real step observations (max observed real step was 13.80C) -- meaning it provided no real detection power at all, only ever tested as "never fires." 8.0 sits comfortably above the real P99 (5.10C). Matches the same pattern already found for CPU_MAX_STEP_W: 91.4% of what this threshold catches (32/35 exceedances) falls in the first 150 windows -- the known, already-documented startup-ramp period, not a new phenomenon. Only 3 genuine steady-state exceedances remain across ~1650 windows. Calibrated against exactly one real file (run_2node.jsonl) -- revisit if a second real file shows meaningfully different behavior.
 
+# ---------------------------------------------------------------------------
+# Sustained deviation ("sticky" discontinuity) -- added 2026-07. Closes a
+# real, confirmed gap: _NLRContinuityCheck only ever compares a value to
+# its IMMEDIATELY PRECEDING window, so it correctly catches the single
+# window a value jumps, then goes silent the instant the tampered value
+# stabilizes -- exactly the "boundary-only, blind to the sustained
+# interior" pattern already found and fixed for the uJ energy counter
+# (see _NLRMonotonicityCheck), now generalized to a NON-cumulative value
+# (wattage, temperature) where a running-max doesn't apply, since these
+# are legitimately allowed to go up AND down.
+#
+# Once a step exceeds the existing GPU_MAX_STEP_W/GPU_TEMP_MAX_STEP_C
+# threshold, the channel stays FAILED -- not just for that one window --
+# until it genuinely returns within a tolerance band of the value it had
+# right before the violation. A channel that never returns (like a
+# sustained replay attack holding a fabricated low value for the entire
+# attack duration) stays FAILED for the whole time, not just the entry
+# transition.
+#
+# Recovery bands calibrated against real clean data (run_2node.jsonl):
+# GPU temp typically wanders ~4.1C (P50) to ~5.2C (P95) around a stable
+# point in a rolling 10-window span, max observed 8.0C -- 6.0C sits with
+# real margin above P95 while remaining meaningfully tighter than the
+# observed max. GPU wattage band (150.0W) taken directly as specified --
+# not independently recalibrated against clean data the way temp was;
+# worth revisiting if it turns out too tight/loose in practice.
+GPU_POWER_RECOVERY_BAND_W = 150.0
+GPU_TEMP_RECOVERY_BAND_C  = 6.0
+
+NLR_STARTUP_RAMP_WINDOWS = 150
+# _NLRSustainedDeviationCheck does not activate until after this many
+# windows. Found necessary, not just cautious: during the documented
+# startup ramp, wattage legitimately passes through several genuinely
+# different stable levels in quick succession -- "return to the
+# original pre-violation reference" is the wrong criterion there, since
+# the whole point of a ramp is settling somewhere different. Without
+# this exclusion, the check locks onto a reference from early in the
+# ramp and never recovers for the rest of the file (confirmed directly:
+# a single trigger at idx 133 cascaded into 3000+ false positives
+# running all the way to the end of a real file). Matches the same
+# ~150-window boundary already established and used throughout this
+# project for CPU/GPU startup-ramp behavior. _NLRContinuityCheck still
+# catches genuine discontinuities during the ramp exactly as before --
+# only this check's sticky/sustained behavior is gated.
+
 # Derived (not arbitrary): CPU_POWER_CEILING_W for one ENF window,
 # converted to uJ, with a 1.5x safety margin.
 _ENF_WINDOW_SECONDS = 2.0
@@ -176,6 +363,66 @@ SYNC_EVENT_MIN_NODES    = 4     # CEILING on the absolute-node requirement --
                                  # scales DOWN for smaller deployments, see
                                  # _apply_synchronized_event_correlation
 SYNC_EVENT_MIN_FRACTION = 0.5   # AND must be at least this fraction of nodes present
+
+SYNC_EVENT_MAX_STEP_MULTIPLE = 1.2
+# ADDED 2026-07, after a real gap was found: a coordinated attack that
+# hits every node in a small (2-node) deployment simultaneously was
+# getting corroboration-downgraded from FAILED to SUSPECT even for a
+# 500-600W GPU wattage drop -- roughly 1.26x-1.43x the (recalibrated)
+# GPU_MAX_STEP_W threshold. A 2-node deployment is the worst case for
+# this tradeoff: "2 of 2 nodes agreeing" is trivially satisfied the
+# moment both are attacked at once, with no safety margin left the way
+# a larger deployment would have.
+#
+# The fix: corroboration should only be able to explain away a
+# BORDERLINE step -- one just past the threshold, plausible as a
+# slightly-larger-than-typical legitimate event (checkpoint save,
+# sync barrier). A step 1.5-2x past the threshold is a fundamentally
+# less plausible claim, and an attacker who controls every node in a
+# small deployment can trivially fake "borderline agreement" -- but
+# faking a genuinely large, simultaneous jump on real, independent
+# hardware is a much bigger ask. 1.2x was chosen specifically to
+# exclude the real attack case found (1.26x-1.43x) while still leaving
+# room for genuinely borderline legitimate events. HONEST CAVEAT: this
+# multiple has not been validated against a real, known legitimate
+# large-magnitude synchronized event (checkpoint saves in the data
+# profiled so far have all been comfortably under the base threshold,
+# not testing this specific boundary) -- a judgment call in the same
+# "placeholder, revisit with more data" spirit as the rest of this
+# corroboration mechanism's documented tradeoffs.
+
+# ---------------------------------------------------------------------------
+# Cross-sibling consistency -- added 2026-07. Fully self-referential and
+# fair: uses ONLY channels already present in the compressed data every
+# consumer (including the digital twin) already receives -- no new
+# columns, no held-back raw data, no hidden reference. GPUs (and, more
+# weakly, CPUs) on the SAME node doing the SAME distributed job show
+# strong, physically real correlation with each other -- a targeted,
+# single-channel replay that leaves siblings untouched breaks that
+# correlation, even when the replayed value is itself completely
+# plausible in isolation and the attacker has exactly the same access
+# to this relationship as the verifier does.
+#
+# Validated against a real file (run_2node.jsonl) using attack.py's
+# actual replay mechanism (not a hand-picked, easier case):
+#   GPU wattage:      100% recall (900/900), every GPU, both nodes,
+#                      0-1.78% false positives
+#   GPU temperature:  100% recall (900/900), every GPU, both nodes,
+#                      0% false positives -- tighter than wattage,
+#                      makes sense given siblings share the same
+#                      physical chassis/cooling environment
+#   CPU wattage:       weak (3-33% recall) -- only 2 siblings per node
+#                      instead of 4, and CPU workload (data loading,
+#                      orchestration) is less tightly synchronized
+#                      than GPU compute. Kept anyway: 0% false
+#                      positives, genuinely zero-cost when it doesn't
+#                      fire, real signal on the cases it does catch.
+GPU_POWER_SIBLING_RATIO_MIN = 0.85
+GPU_POWER_SIBLING_RATIO_MAX = 1.10
+GPU_TEMP_SIBLING_RATIO_MIN  = 0.90
+GPU_TEMP_SIBLING_RATIO_MAX  = 1.15
+CPU_POWER_SIBLING_RATIO_MIN = 0.75
+CPU_POWER_SIBLING_RATIO_MAX = 1.40
 
 # Score values
 SCORE_TRUSTED      = 0.95
@@ -520,6 +767,220 @@ class _RawDriftCheck:
         return True, "ok"
 
 
+class _ENFAlternativeCorrelationCheck:
+    """
+    ENF ONLY. Simulates the reference papers' actual architecture more
+    faithfully than a direct value diff: an independently-measured
+    second ENF stream, compared via windowed Pearson correlation. See
+    ENF_ALT_* constants for full calibration details and reasoning.
+
+    Maintains a rolling window of the last ENF_ALT_WINDOW_SIZE observed
+    (possibly tampered) values, and the aligned window from the
+    alternative stream, recomputing correlation each time the window is
+    full. Skips windows where either signal is nearly flat -- see
+    ENF_ALT_MIN_VARIANCE.
+
+    VALIDATED PERFORMANCE (window=40, threshold=0.999, noise_std=0.0001
+    -- see the constants' own comments for the two-pass recalibration
+    history), against real data:
+      Replay attacks:  99.2% (893/900) on a real replay attack -- the
+                        7 remaining misses sit at the very start of the
+                        attack (inherent detection latency, needs 40
+                        windows of history before correlation means
+                        anything, not a threshold gap).
+      Bias injection:  ~1% (9/900) -- CANNOT meaningfully catch this,
+                        regardless of noise/window/threshold tuning.
+                        Pearson correlation is mathematically invariant
+                        to a constant additive shift (proved directly:
+                        corr(x, x+c) = 1.0 for any constant c), so a
+                        uniform offset preserves the signal's shape
+                        perfectly while moving its level -- exactly
+                        what this mechanism structurally cannot see.
+      Clean data:      0 false positives on an independent file. The
+                        false positives that DO appear (39/1800 on the
+                        attack file) all fall within the 40-window
+                        recovery tail right after an attack ends, where
+                        the rolling window is still partially aging out
+                        tampered history -- expected and explained, not
+                        a real concern.
+
+    Given the above, this check is now the ONLY ENF cross-verification
+    mechanism in this file (the exact-value baseline check it replaced
+    was removed 2026-07, once this check's recall was tuned high enough
+    to be trusted as the sole ENF cross-check) -- but the bias-injection
+    blind spot is real and permanent. Worth keeping in mind for whatever
+    this project's writeup says about ENF injection-attack coverage.
+    """
+
+    def __init__(
+        self,
+        alternative: list,
+        window_size: int = ENF_ALT_WINDOW_SIZE,
+        threshold: float = ENF_ALT_CORRELATION_THRESHOLD,
+        min_variance: float = ENF_ALT_MIN_VARIANCE,
+    ):
+        self._alternative = alternative
+        self._window_size = window_size
+        self._threshold = threshold
+        self._min_variance = min_variance
+        self._recent_observed: collections.deque = collections.deque(maxlen=window_size)
+        self._recent_alt: collections.deque = collections.deque(maxlen=window_size)
+
+    def check(self, index: int, observed_freq: float) -> tuple[bool, str]:
+        if index < 0 or index >= len(self._alternative):
+            return True, "ok"
+
+        self._recent_observed.append(observed_freq)
+        self._recent_alt.append(self._alternative[index])
+
+        if len(self._recent_observed) < self._window_size:
+            return True, "ok"
+
+        observed_window = list(self._recent_observed)
+        alt_window = list(self._recent_alt)
+
+        var_observed = statistics.variance(observed_window)
+        var_alt = statistics.variance(alt_window)
+        if var_observed < self._min_variance or var_alt < self._min_variance:
+            return True, "ok"  # too flat for correlation to be meaningful
+
+        mean_o = statistics.mean(observed_window)
+        mean_a = statistics.mean(alt_window)
+        cov = sum(
+            (observed_window[i] - mean_o) * (alt_window[i] - mean_a)
+            for i in range(self._window_size)
+        )
+        denom = (var_observed * var_alt) ** 0.5 * (self._window_size - 1)
+        # statistics.variance divides by (n-1), matching cov's own
+        # implicit (n-1) scaling above so they cancel consistently
+        if denom == 0:
+            return True, "ok"
+        correlation = cov / denom
+
+        if correlation < self._threshold:
+            return False, (
+                f"CORRELATION MISMATCH: observed ENF over the last "
+                f"{self._window_size} windows correlates at "
+                f"{correlation:.3f} with the independently-measured "
+                f"reference -- below the {self._threshold} threshold "
+                f"real, untampered sensor pairs stay above"
+            )
+        return True, "ok"
+
+
+def _extract_node_id_from_key(key: str) -> str:
+    """
+    Extracts the node ID prefix from a full column name, e.g.
+    'x3102c0s25b0n0_gpu-0[W]' -> 'x3102c0s25b0n0'. Same convention used
+    throughout this project (run_microverse.py's node grouping,
+    attack.py's own scan_telemetry_schema()).
+    """
+    if "_gpu-" in key:
+        return key.split("_gpu-")[0]
+    if "_cpu-" in key:
+        return key.split("_cpu-")[0]
+    return None
+
+
+class _CrossSiblingConsistencyCheck:
+    """
+    Fully self-referential and fair: uses ONLY channels already present
+    in the compressed data every consumer (including the digital twin)
+    already receives -- no new columns, no held-back raw data, no
+    hidden reference the attacker doesn't also have access to.
+
+    GPUs (and, more weakly, CPUs) on the SAME node doing the SAME
+    distributed job show strong, physically real correlation with each
+    other -- a targeted, single-channel replay that leaves siblings
+    untouched breaks that correlation, even when the replayed value is
+    itself completely plausible in isolation. Closes the specific gap
+    found in a well-chosen, phase-matched single-GPU replay that
+    defeated every range/step-size/energy-consistency check already in
+    this file.
+
+    Compares each channel against the mean of its siblings on the SAME
+    node -- never across nodes, never against history, purely within
+    the single record being checked.
+
+    Validated against a real file (run_2node.jsonl) using attack.py's
+    actual replay mechanism (not a hand-picked, easier case):
+      GPU wattage:     100% recall (900/900), every GPU, both nodes,
+                        0-1.78% false positives
+      GPU temperature: 100% recall (900/900), every GPU, both nodes,
+                        0% false positives -- tighter than wattage,
+                        makes sense given siblings share the same
+                        physical chassis/cooling environment
+      CPU wattage:      weak (3-33% recall) -- only 2 siblings per
+                        node instead of 4, and CPU workload is less
+                        tightly synchronized than GPU compute. Kept
+                        anyway: 0% false positives, genuinely
+                        zero-cost when it doesn't fire.
+
+    "-core[W]" channels deliberately excluded -- tested directly and
+    found wildly unstable sibling ratios (P99.5 up to ~293x) even on
+    genuinely clean data, likely because their values are tiny
+    (0.03-0.3W observed) and dominated by measurement noise at that
+    scale. Same exclusion already applied to the power/energy check
+    for the same reason.
+    """
+
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
+        channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
+
+        typed_groups = (
+            (channels["gpu_power"], GPU_POWER_SIBLING_RATIO_MIN, GPU_POWER_SIBLING_RATIO_MAX, "W"),
+            (channels["gpu_temp"],  GPU_TEMP_SIBLING_RATIO_MIN,  GPU_TEMP_SIBLING_RATIO_MAX,  "C"),
+            (channels["cpu_power"], CPU_POWER_SIBLING_RATIO_MIN, CPU_POWER_SIBLING_RATIO_MAX, "W"),
+        )
+
+        for keys, ratio_min, ratio_max, unit in typed_groups:
+            keys = [k for k in keys if "-core" not in k]
+
+            by_node: dict[str, list[str]] = collections.defaultdict(list)
+            for key in keys:
+                node_id = _extract_node_id_from_key(key)
+                if node_id is not None:
+                    by_node[node_id].append(key)
+
+            for node_id, node_keys in by_node.items():
+                if len(node_keys) < 2:
+                    continue  # no siblings on this node to compare against
+                for key in node_keys:
+                    val = record.get(key)
+                    if val is None:
+                        continue
+                    sibling_vals = [
+                        record.get(k) for k in node_keys if k != key
+                    ]
+                    sibling_vals = [v for v in sibling_vals if v is not None]
+                    if not sibling_vals:
+                        continue
+                    # median, not mean -- a single tampered sibling
+                    # shouldn't be able to drag the reference point used
+                    # to judge its OWN innocent neighbors. With 3+ GPU
+                    # siblings this is robust to one bad value; with
+                    # only 1 CPU sibling it's unchanged either way.
+                    sibling_ref = statistics.median(sibling_vals)
+                    if sibling_ref <= 1:
+                        continue  # avoid divide-by-near-zero at idle
+                    ratio = val / sibling_ref
+                    if not (ratio_min <= ratio <= ratio_max):
+                        results[key] = (_FAILED, (
+                            f"SIBLING MISMATCH: {key}={val:.2f}{unit} vs "
+                            f"sibling median {sibling_ref:.2f}{unit} on the "
+                            f"same node (ratio={ratio:.2f}, expected "
+                            f"[{ratio_min}, {ratio_max}]) -- same-node "
+                            f"channels of this type normally track each "
+                            f"other closely"
+                        ))
+
+        return results
+
+    def reset(self) -> None:
+        pass  # fully stateless -- every record checked independently
+
+
 class _NLRRangeCheck:
     """
     Confirms GPU and CPU power readings are physically plausible.
@@ -612,20 +1073,152 @@ class _NLRContinuityCheck:
         self._prev.clear()
 
 
-class _NLRMonotonicityCheck:
+class _NLRSustainedDeviationCheck:
     """
-    Confirms CPU energy counters (uJ) behave like a real hardware
-    energy counter in BOTH directions:
-      - may only decrease via a known RAPL wraparound (~65.5B uJ drop)
-        -- any other decrease is a rollback attack, hiding real energy use
-      - may not increase by more than CPU_UJ_MAX_STEP_UJ in one window
-        (PLACEHOLDER, derived from CPU_POWER_CEILING_W -- not yet
-        profiled against real data) -- an implausibly large increase
-        that stayed "monotonic" would previously have passed unnoticed
+    GPU wattage and temperature only. Closes the "boundary-only" gap
+    left by _NLRContinuityCheck: that check compares each value only
+    to its immediately preceding window, so it correctly flags the
+    single window a value jumps, then goes silent the instant the
+    tampered value stabilizes -- a sustained replay that holds a
+    fabricated value for hundreds of windows is invisible to it after
+    the first one.
+
+    Once a step exceeds GPU_MAX_STEP_W/GPU_TEMP_MAX_STEP_C, the channel
+    is marked FAILED and STAYS failed on every subsequent window --
+    not just the entry transition -- until it genuinely returns within
+    GPU_POWER_RECOVERY_BAND_W/GPU_TEMP_RECOVERY_BAND_C of the value it
+    had right before the violation. See the constants above for
+    calibration details.
+
+    Does not apply to CPU wattage or CPU energy -- CPU wattage's much
+    higher natural volatility (see _CPUPowerEnergyConsistencyCheck's
+    calibration notes) hasn't been separately profiled for a sensible
+    recovery band, and CPU energy already has its own dedicated,
+    better-suited fix (_NLRMonotonicityCheck's running-max, since
+    energy is cumulative and wattage/temperature are not).
     """
 
     def __init__(self):
         self._prev: dict[str, float] = {}
+        self._reference: dict[str, float] = {}  # value right before the violation
+        self._stuck: dict[str, bool] = {}
+        self._window_count = 0
+
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
+        self._window_count += 1
+        channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
+
+        if self._window_count <= NLR_STARTUP_RAMP_WINDOWS:
+            # Still track _prev during the ramp so the check has a
+            # sensible baseline the instant it activates -- just don't
+            # act on anything yet.
+            for keys, _, _, _ in (
+                (channels["gpu_power"], None, None, None),
+                (channels["gpu_temp"], None, None, None),
+            ):
+                for key in keys:
+                    val = record.get(key)
+                    if val is not None:
+                        self._prev[key] = val
+            return results
+
+        typed_groups = (
+            (channels["gpu_power"], GPU_MAX_STEP_W, GPU_POWER_RECOVERY_BAND_W, "W"),
+            (channels["gpu_temp"],  GPU_TEMP_MAX_STEP_C, GPU_TEMP_RECOVERY_BAND_C, "C"),
+        )
+
+        for keys, step_threshold, recovery_band, unit in typed_groups:
+            for key in keys:
+                val = record.get(key)
+                if val is None:
+                    continue
+
+                prev = self._prev.get(key)
+                if prev is None:
+                    self._prev[key] = val
+                    continue
+
+                if self._stuck.get(key):
+                    ref = self._reference[key]
+                    if abs(val - ref) <= recovery_band:
+                        self._stuck[key] = False
+                        results[key] = (_TRUSTED, "ok")
+                    else:
+                        results[key] = (_FAILED, (
+                            f"SUSTAINED DEVIATION: {key}={val:.2f}{unit} has "
+                            f"not recovered -- still {abs(val - ref):.2f}{unit} "
+                            f"away from the {ref:.2f}{unit} it held before the "
+                            f"original jump (recovery band: "
+                            f"+/-{recovery_band}{unit})"
+                        ))
+                else:
+                    step = abs(val - prev)
+                    if step > step_threshold:
+                        self._stuck[key] = True
+                        self._reference[key] = prev
+                        results[key] = (_FAILED, (
+                            f"SUSTAINED DEVIATION: {key} jumped "
+                            f"{step:.2f}{unit} to {val:.2f}{unit} -- will stay "
+                            f"FAILED until it returns within "
+                            f"+/-{recovery_band}{unit} of {prev:.2f}{unit}"
+                        ))
+
+                self._prev[key] = val
+
+        return results
+
+    def reset(self) -> None:
+        self._prev.clear()
+        self._reference.clear()
+        self._stuck.clear()
+        self._window_count = 0
+
+
+class _NLRMonotonicityCheck:
+    """
+    Confirms CPU energy counters (uJ) behave like a real hardware
+    energy counter in BOTH directions.
+
+    DECREASE direction -- tracks a RUNNING MAXIMUM per channel, not
+    just the immediately preceding value. Added 2026-07 after finding
+    prev-only comparison could only catch the exact moment a tampered
+    reading first dropped below the true trajectory, not the full
+    duration it stayed dropped -- validated against a real ground-
+    truth attack (same-node value replay, ~260-270 billion uJ drop for
+    270 windows): prev-only comparison caught 3/270 (only the moments
+    a replay cycle happened to restart); running-max comparison
+    catches all 270/270. A cumulative energy counter can only
+    legitimately go backward via the known hardware wraparound; any
+    other drop below the highest legitimately-observed value is
+    tampering, for as long as it stays below that high-water mark --
+    not just on the first window it happens. Recovery is close to
+    immediate once the real counter naturally exceeds the frozen
+    running max again -- the real counter keeps accumulating in the
+    background regardless of what's being reported, so the moment
+    tampering stops, the true value is almost always already higher
+    than wherever the running max got frozen. No explicit recovery
+    mechanism needed here, unlike LocalCUSUMDetector's confidence-
+    based checks.
+
+    INCREASE direction -- measured against the immediately preceding
+    ACTUAL reading (not the running max, which can be stale during an
+    ongoing drop) so a genuine single-window step size is what's being
+    judged, not a distance from a frozen historical reference.
+    PLACEHOLDER threshold, not yet profiled against real data -- an
+    implausibly large increase that stayed "monotonic" would otherwise
+    pass unnoticed. Note the transition window right as a genuine
+    attack ends can itself trip this (jumping from a tampered low
+    reading back to the true, much higher trajectory looks like a
+    large single-window step) -- that's a real, defensible catch in
+    its own right, not a false positive to suppress; it just means
+    full recovery to TRUSTED lands one window after the attack
+    actually ends, not on the exact same window.
+    """
+
+    def __init__(self):
+        self._prev: dict[str, float] = {}
+        self._running_max: dict[str, float] = {}
 
     def check(self, record: dict) -> dict[str, tuple[str, str]]:
         channels = _find_nlr_keys(record)
@@ -636,38 +1229,55 @@ class _NLRMonotonicityCheck:
             if val is None:
                 continue
             prev = self._prev.get(key)
+            running_max = self._running_max.get(key)
 
             if prev is None:
                 results[key] = (_TRUSTED, "ok")
-            elif val < prev:
-                drop = prev - val
-                is_expected_wrap = abs(drop - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
+                self._prev[key] = val
+                self._running_max[key] = val
+                continue
+
+            if val < running_max:
+                drop_from_prev = prev - val
+                is_expected_wrap = (
+                    drop_from_prev > 0
+                    and abs(drop_from_prev - CPU_UJ_WRAP_CEILING) < CPU_UJ_WRAP_TOLERANCE
+                )
                 if is_expected_wrap:
                     results[key] = (_TRUSTED, "ok")
+                    self._running_max[key] = val  # new post-wrap epoch
                 else:
                     results[key] = (_FAILED, (
-                        f"MONOTONICITY VIOLATION: {key} decreased by "
-                        f"{drop:.1f} uJ -- not consistent with known hardware "
-                        f"wrap (~{CPU_UJ_WRAP_CEILING:.0f} uJ). "
-                        f"Counter should only increase or wrap."
+                        f"MONOTONICITY VIOLATION: {key}={val:.1f} uJ is "
+                        f"{running_max - val:.1f} uJ below the highest "
+                        f"legitimately observed value ({running_max:.1f} uJ) "
+                        f"-- not consistent with known hardware wrap "
+                        f"(~{CPU_UJ_WRAP_CEILING:.0f} uJ). Stays flagged "
+                        f"until a reading naturally exceeds this high-water "
+                        f"mark again."
                     ))
+                    # running_max deliberately NOT updated here -- keeps
+                    # every subsequent still-low reading caught too, not
+                    # just this one.
+                self._prev[key] = val
             else:
-                increase = val - prev
-                if increase > CPU_UJ_MAX_STEP_UJ:
+                step = val - prev
+                if step > CPU_UJ_MAX_STEP_UJ:
                     results[key] = (_FAILED, (
-                        f"ENERGY SPIKE: {key} increased by {increase:.1f} uJ "
+                        f"ENERGY SPIKE: {key} increased by {step:.1f} uJ "
                         f"in one window, exceeds plausibility ceiling "
                         f"{CPU_UJ_MAX_STEP_UJ:.1f} uJ (PLACEHOLDER threshold)"
                     ))
                 else:
                     results[key] = (_TRUSTED, "ok")
-
-            self._prev[key] = val
+                self._prev[key] = val
+                self._running_max[key] = val
 
         return results
 
     def reset(self) -> None:
         self._prev.clear()
+        self._running_max.clear()
 
 
 class _GPUTempRangeCheck:
@@ -788,6 +1398,35 @@ def _is_pure_discontinuity(reason: str) -> bool:
     return not any(d in reason for d in disqualifying)
 
 
+_DISCONTINUITY_STEP_RE = re.compile(
+    r"stepped ([\d.]+)\S* between windows, exceeds max plausible step ([\d.]+)"
+)
+
+
+def _is_within_corroboration_ceiling(
+    reason: str, max_multiple: float = SYNC_EVENT_MAX_STEP_MULTIPLE
+) -> bool:
+    """
+    Parses the actual step size and threshold directly out of the
+    DISCONTINUITY reason string (see _DISCONTINUITY_STEP_RE) and
+    checks the step doesn't exceed max_multiple x the threshold that
+    was crossed. See SYNC_EVENT_MAX_STEP_MULTIPLE for the full
+    reasoning -- corroboration should only forgive a borderline step,
+    not an extreme one, regardless of how many nodes agree on it.
+
+    Returns True (eligible) if the reason can't be parsed at all --
+    fails open toward the EXISTING behavior rather than silently
+    blocking corroboration on a format this wasn't written to expect.
+    """
+    match = _DISCONTINUITY_STEP_RE.search(reason)
+    if not match:
+        return True
+    step, threshold = float(match.group(1)), float(match.group(2))
+    if threshold <= 0:
+        return True
+    return step <= threshold * max_multiple
+
+
 def _apply_synchronized_event_correlation(
     merged: dict[str, tuple[str, str]],
     max_min_nodes: int = SYNC_EVENT_MIN_NODES,
@@ -809,7 +1448,10 @@ def _apply_synchronized_event_correlation(
 
     Only PURE discontinuity failures are eligible (see
     _is_pure_discontinuity) -- corroboration never rescues a channel
-    that is also out of range or violating monotonicity.
+    that is also out of range or violating monotonicity. As of 2026-07,
+    also requires the step stay within SYNC_EVENT_MAX_STEP_MULTIPLE x
+    the threshold that was crossed (see _is_within_corroboration_ceiling)
+    -- corroboration forgives a borderline step, not an extreme one.
 
     The absolute-node requirement SCALES with how many nodes actually
     have this channel present this window, rather than being a fixed
@@ -848,7 +1490,9 @@ def _apply_synchronized_event_correlation(
         total_nodes = len(keys)
         failed_keys = [
             k for k in keys
-            if merged[k][0] == _FAILED and _is_pure_discontinuity(merged[k][1])
+            if merged[k][0] == _FAILED
+            and _is_pure_discontinuity(merged[k][1])
+            and _is_within_corroboration_ceiling(merged[k][1])
         ]
         if not failed_keys:
             continue
@@ -903,6 +1547,12 @@ class Verifier:
     check_nlr : bool
         Whether to run the NLR/GPU-temp checks. Default True.
         Set False for ENF-only testing.
+    enf_alternative : list[float], optional
+        Independently-noised second ENF stream, ENF ONLY -- see
+        _ENFAlternativeCorrelationCheck's docstring. Must come from data
+        held before any attack injection touched it -- same principle
+        as combined_smooth() needing to run upstream of attack.py. If
+        not provided, the correlation comparison simply doesn't run.
     """
 
     def __init__(
@@ -911,6 +1561,7 @@ class Verifier:
         warmup_windows: int = 10,
         strict_ordering: bool = True,
         check_nlr: bool = True,
+        enf_alternative: list = None,
     ):
         self._component_id = component_id
         self._warmup_windows = warmup_windows
@@ -924,11 +1575,14 @@ class Verifier:
         self._drift_monitor       = _DriftMonitor()
         self._local_cusum         = _LocalCUSUMDetector()
         self._raw_drift_check     = _RawDriftCheck()
+        self._alt_correlation_check = _ENFAlternativeCorrelationCheck(enf_alternative) if enf_alternative is not None else None
 
         # NLR checks -- multi-node aware, no configuration needed
         self._nlr_range_check        = _NLRRangeCheck()
         self._nlr_continuity_check   = _NLRContinuityCheck()
         self._nlr_monotonicity_check = _NLRMonotonicityCheck()
+        self._cross_sibling_check = _CrossSiblingConsistencyCheck()
+        self._sustained_deviation_check = _NLRSustainedDeviationCheck()
         self._gpu_temp_range_check      = _GPUTempRangeCheck()
         self._gpu_temp_continuity_check = _GPUTempContinuityCheck()
 
@@ -998,6 +1652,22 @@ class Verifier:
             if not passed:
                 enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
                 enf_reasons.append(reason)
+
+            # Windowed correlation against an independently-noised
+            # second stream -- see _ENFAlternativeCorrelationCheck's
+            # docstring. Only runs if an alternative stream was
+            # actually provided to this Verifier.
+            if self._alt_correlation_check is not None:
+                index = None
+                if isinstance(sample, dict):
+                    index = sample.get("index")
+                else:
+                    index = getattr(sample, "index", None)
+                if index is not None:
+                    passed, reason = self._alt_correlation_check.check(index, raw_freq)
+                    if not passed:
+                        enf_status = _worse(enf_status, VerificationStatus.FAILED.value)
+                        enf_reasons.append(reason)
 
         passed, reason = self._range_check.check(anchor.signature)
         if not passed:
@@ -1093,6 +1763,8 @@ class Verifier:
                 self._nlr_range_check.check(record_dict),
                 self._nlr_continuity_check.check(record_dict),
                 self._nlr_monotonicity_check.check(record_dict),
+                self._cross_sibling_check.check(record_dict),
+                self._sustained_deviation_check.check(record_dict),
                 self._gpu_temp_range_check.check(record_dict),
                 self._gpu_temp_continuity_check.check(record_dict),
             )

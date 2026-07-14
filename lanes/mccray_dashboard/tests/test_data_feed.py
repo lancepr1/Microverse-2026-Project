@@ -23,8 +23,8 @@ def test_poll_returns_first_sample_immediately(tmp_path, monkeypatch):
     data_feed.init_feed("run_test.jsonl")
 
     state = data_feed.poll()
-    assert data_feed.RACK_ID in state
-    rack = state[data_feed.RACK_ID]
+    assert data_feed.get_rack_id() in state
+    rack = state[data_feed.get_rack_id()]
     assert rack["frq_hz"] == 59.5
     assert rack["total_power_w"] == 70.0 + 90.0
     assert rack["average_gpu_temp_c"] == 40.0
