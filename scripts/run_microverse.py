@@ -85,6 +85,7 @@ at all (discover_nlr_pairs(folder, slurm_id=None)).
 import argparse
 import os
 import json
+import random
 import re
 import sys
 from pathlib import Path
@@ -316,13 +317,24 @@ def stage_1_ingest_and_smooth(args) -> Path:
     enf = load_enf(args.enf_path)
     enf = combined_smooth(enf)
 
-    # Held here, before attack injection ever runs, as the untampered
-    # reference for _ENFBaselineCheck in stage_3 -- same "clean
-    # upstream of the attacker" principle as combined_smooth() itself.
-    # This exact array, not a re-derived or re-loaded copy, is what
-    # gets compared against later -- guarantees it was never anywhere
-    # near attack.py.
-    args.enf_baseline = list(enf)
+    # Generates the independently-noised second ENF stream used by
+    # _ENFAlternativeCorrelationCheck in stage_3 -- simulates a
+    # genuinely independent sensor reading, NOT a delayed copy (grid
+    # frequency is a shared electrical property that updates
+    # essentially simultaneously across a synchronized interconnect;
+    # what actually differs between two real sensors is independent
+    # local measurement noise, not distance-based delay). Generated
+    # here, before attack injection ever runs, from this exact clean
+    # array -- same "clean upstream of the attacker" principle as
+    # combined_smooth() itself, and the same requirement
+    # _ENFAlternativeCorrelationCheck's docstring documents. This
+    # array is held by the pipeline and passed directly to the
+    # verifier in stage_3 -- attack.py never sees it.
+    from verification import ENF_ALT_NOISE_STD
+    _enf_noise_rng = random.Random(getattr(args, "enf_alt_seed", None))
+    args.enf_alternative = [
+        v + _enf_noise_rng.gauss(0, ENF_ALT_NOISE_STD) for v in enf
+    ]
 
     print(f"[1/4] Discovering NLR pairs in {args.nlr_folder} "
           f"(workload_type={args.workload_type}) ...")
@@ -532,7 +544,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         component_id=args.component_id,
         warmup_windows=10,
         check_nlr=True,
-        enf_baseline=getattr(args, "enf_baseline", None),
+        enf_alternative=getattr(args, "enf_alternative", None),
     )
 
     STATUS_RANK = {"trusted": 0, "suspect": 1, "failed": 2}

@@ -86,7 +86,14 @@ def base_node_record(node_id="node_A"):
     }
 
 
-def make_records(n, node_ids=("node_A",), enf_fn=smooth_enf, uj_step=1_000_000.0):
+def make_records(n, node_ids=("node_A",), enf_fn=smooth_enf, uj_step=180_000_000.0):
+    # uj_step default changed (2026-07) from an arbitrary 1,000,000 to
+    # 180,000,000 -- matches what base_node_record()'s actual cpu-0/1[W]
+    # values (90W/91W) physically predict over a 2-second window
+    # (power * 2.0s * 1e6 uJ/J), now that _CPUPowerEnergyConsistencyCheck
+    # checks that relationship. The old fixed, disconnected value made
+    # every test using make_records() with CPU channels trip the new
+    # check regardless of what the test actually meant to exercise.
     records = []
     for i in range(n):
         r = {"index": i, "FRQ": round(enf_fn(i), 6)}
@@ -100,12 +107,13 @@ def make_records(n, node_ids=("node_A",), enf_fn=smooth_enf, uj_step=1_000_000.0
     return records
 
 
-def run_verifier(records, component_id="rack_00", warmup_windows=10):
+def run_verifier(records, component_id="rack_00", warmup_windows=10, enf_alternative=None):
     """Runs the full real pipeline (AnchorExtractor + Verifier) over a
     list of records, returns {index: [VerificationResult, ...]}."""
     enf_list = [r["FRQ"] for r in records]
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
-    verifier = Verifier(component_id=component_id, warmup_windows=warmup_windows)
+    verifier = Verifier(component_id=component_id, warmup_windows=warmup_windows,
+                         enf_alternative=enf_alternative)
 
     all_results = {}
     for record in records:
@@ -361,6 +369,36 @@ def test_enf_nominal_spike_end_to_end():
           enf_result.status == "failed" and "NOMINAL" in enf_result.reason, enf_result.reason)
 
 
+def test_correlation_check_passes_on_genuinely_correlated_streams():
+    records = make_records(60, node_ids=("node_A",))
+    alternative = [smooth_enf(i) + 0.0005 for i in range(60)]  # tiny independent noise
+    results = run_verifier(records, enf_alternative=alternative)
+    any_failed = any(
+        r.status == "failed" and "CORRELATION" in r.reason
+        for i in results for r in results[i]
+    )
+    check("Integration: correlation check stays quiet on two genuinely correlated ENF streams",
+          not any_failed, "a correlation failure fired on clean, correlated data")
+
+
+def test_correlation_check_catches_genuine_decorrelation():
+    def decorrelated_enf(i):
+        if 20 <= i < 60:
+            # different shape entirely, not just a different level --
+            # correlation can't see a shift but WILL see this
+            return 60.0 + 0.05 * math.sin(i / 2.0)
+        return smooth_enf(i)
+    records = make_records(60, node_ids=("node_A",), enf_fn=decorrelated_enf)
+    alternative = [smooth_enf(i) for i in range(60)]
+    results = run_verifier(records, enf_alternative=alternative)
+    caught = any(
+        r.status == "failed" and "CORRELATION" in r.reason
+        for r in results.get(59, [])
+    )
+    check("Integration: correlation check catches genuine pattern decorrelation (not just a level shift)",
+          caught, results.get(59))
+
+
 def test_synchronized_event_downgraded_to_suspect():
     """A real system-wide event (checkpoint/sync/startup) shows up as
     the SAME channel stepping on MANY independent nodes at once --
@@ -369,7 +407,7 @@ def test_synchronized_event_downgraded_to_suspect():
     nodes = tuple(f"node_{i}" for i in range(16))
     records = make_records(20, node_ids=nodes)
     for node in nodes[:14]:  # 14/16 nodes -- passes both min_nodes and min_fraction
-        records[10][f"{node}_cpu-0[W]"] = 90.0 + 25.0
+        records[10][f"{node}_cpu-0[W]"] = 90.0 + 18.0  # 18/16=1.125x threshold -- borderline, within SYNC_EVENT_MAX_STEP_MULTIPLE
     results = run_verifier(records)
     r10 = results[10]
 
@@ -417,8 +455,8 @@ def test_small_deployment_scaled_floor_both_nodes_agree():
     4 nodes regardless of deployment size."""
     nodes = ("node_A", "node_B")
     records = make_records(20, node_ids=nodes)
-    records[10]["node_A_cpu-0[W]"] = 90.0 + 25.0
-    records[10]["node_B_cpu-0[W]"] = 90.0 + 24.0
+    records[10]["node_A_cpu-0[W]"] = 90.0 + 18.0  # borderline, within ceiling
+    records[10]["node_B_cpu-0[W]"] = 90.0 + 17.0
     results = run_verifier(records)
     r10 = results[10]
 
@@ -492,7 +530,9 @@ def test_coordinated_attack_at_majority_evades_KNOWN_LIMITATION():
     records = make_records(20, node_ids=nodes)
     compromised = nodes[:8]
     for node in compromised:
-        records[10][f"{node}_cpu-0[W]"] = 90.0 + 25.0
+        records[10][f"{node}_cpu-0[W]"] = 90.0 + 18.0  # borderline step -- this test
+        # documents the node-count/fraction loophole specifically, not step-size
+        # extremity, which SYNC_EVENT_MAX_STEP_MULTIPLE addresses separately
     results = run_verifier(records)
     r10 = results[10]
 
