@@ -8,8 +8,7 @@ status was not "good" on a polled sample, categorized by severity
 ("suspect" -> Warning, "warning" -> Alert) so the Alert log tab can group
 and filter by it. Only severity is surfaced to the operator, not the
 underlying verification score -- per spec, the raw score is noise they
-don't want to see. prediction stays a placeholder ("No prediction") --
-there is no RNN forecast to compare against.
+don't want to see.
 
 attack_vector IS real, not a guess: verification.py's individual checks
 (_SequenceGuard, _DriftMonitor, _NLRRangeCheck, etc.) already write a
@@ -120,7 +119,6 @@ def _extend_or_open_episode(node_id: str, severity: str, now: float,
             "severity": severity,
             "start_ts": now,
             "sample_count": 0,
-            "prediction": "No prediction",
             "attack_vector": UNCLASSIFIED_VECTOR,
         }
         _open_episodes[node_id] = episode

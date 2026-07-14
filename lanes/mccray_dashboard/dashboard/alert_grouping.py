@@ -6,7 +6,7 @@ toggle).
 
 Groups alert-episode rows -- the same dicts alert_log.get_timeline()
 already returns (node_id, severity, start_ts, end_ts, sample_count,
-total_power_w, average_gpu_temp_c, ongoing, prediction), plus a "rack" key
+total_power_w, average_gpu_temp_c, ongoing), plus a "rack" key
 the caller injects -- into time-windowed Incidents, so a burst of
 near-simultaneous alerts across nodes renders as one collapsible incident
 instead of N nearly-identical rows.
