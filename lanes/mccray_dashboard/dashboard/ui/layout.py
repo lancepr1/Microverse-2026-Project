@@ -24,8 +24,18 @@ def build_layout() -> html.Div:
         html.Div(className="header", children=[
             html.Span("AFRL Microverse — Data Center Dashboard",
                       className="header-title"),
-            html.Span("FRQ:", className="label"),
-            html.Div(className="frq-readout", children=[
+            # CHANGED (2026-07, per Leiva's request): label text only --
+            # was "FRQ:". Internal ids (header-frq-hz, header-frq-dot,
+            # header-frq-bubble) and the underlying data field name
+            # (frq_hz) are deliberately left as-is -- renaming those too
+            # would mean touching main.py's Output targets and every
+            # reference to frq_hz throughout data_feed.py/models.py for a
+            # purely cosmetic label change with no functional benefit.
+            html.Span("ENF:", className="label"),
+            # ADDED (2026-07): id -- the whole pill/bubble now gets
+            # status-driven styling (see render_header_frq_bubble_style()
+            # below), not just the small dot inside it.
+            html.Div(className="frq-readout", id="header-frq-bubble", children=[
                 # CHANGED (2026-07): added id -- this dot previously had no
                 # id at all, so nothing could ever target it with a style
                 # Output. It's meant to sit right where an ENF status
@@ -37,7 +47,18 @@ def build_layout() -> html.Div:
                 # comment for the callback that now drives it, and
                 # render_header_frq_dot_style() below for the color logic.
                 html.Span(className="live-pulse-dot", id="header-frq-dot"),
-                html.Span(FRQ_HZ_DEFAULT, id="header-frq-hz"),
+                # CHANGED (2026-07, per Leiva's request): pinned to a
+                # fixed black -- previously this span's text color was
+                # implicitly whatever the "frq-readout" className's CSS
+                # made it (green), which never changed even as the
+                # bubble's own background/border started turning
+                # yellow/red -- confusing, since it looked like the text
+                # itself was claiming "still fine" while the bubble
+                # around it disagreed. An explicit style here always wins
+                # over inherited/className color, and is intentionally
+                # NOT wired to any callback Output -- it's meant to never
+                # change, unlike the bubble/dot above it.
+                html.Span(FRQ_HZ_DEFAULT, id="header-frq-hz", style={"color": "#000000"}),
             ]),
         ]),
         html.Hr(),
@@ -108,6 +129,12 @@ def render_header_frq_multi(state: dict) -> str:
 # "enf_status" field (see that module's own 2026-07 comment) rather than
 # the blended per-node "status" -- this dot should reflect ENF specifically,
 # not any one node's own NLR checks.
+#
+# CHANGED (2026-07, follow-up): the dot alone wasn't visible/prominent
+# enough -- the whole frq-readout pill/bubble now gets the same
+# status-driven coloring too (render_header_frq_bubble_style() below),
+# via the shared _current_enf_label() lookup so both stay in sync off the
+# exact same source rather than two separate iterations that could drift.
 _ENF_DOT_STATUS_STYLE = {
     "good": {
         "backgroundColor": "var(--status-nominal-bg)",
@@ -127,20 +154,64 @@ _ENF_DOT_DEFAULT_STYLE = {
     "border": "1px solid var(--status-default-border)",
 }
 
+# Same status hue tokens as the dot, applied to the whole bubble
+# container instead -- background + border, matching the pattern
+# ui/operator.py's node-card badges already use (_STATUS_BADGE_STYLE),
+# just reused here for the header bubble. No "color" key -- CHANGED
+# (2026-07): the FRQ text span (header-frq-hz, in build_layout() above)
+# is now pinned to a fixed black via its own explicit style, which always
+# wins over anything set here, so a "color" entry in this dict would be
+# dead/misleading -- removed rather than left in place unused.
+_ENF_BUBBLE_STATUS_STYLE = {
+    "good": {
+        "backgroundColor": "var(--status-nominal-bg)",
+        "border": "1px solid var(--status-nominal-border)",
+    },
+    "suspect": {
+        "backgroundColor": "var(--status-warning-bg)",
+        "border": "1px solid var(--status-warning-border)",
+    },
+    "warning": {
+        "backgroundColor": "var(--status-alert-bg)",
+        "border": "1px solid var(--status-alert-border)",
+    },
+}
+_ENF_BUBBLE_DEFAULT_STYLE = {
+    "backgroundColor": "var(--status-default-bg)",
+    "border": "1px solid var(--status-default-border)",
+}
 
-def render_header_frq_dot_style(state: dict) -> dict:
-    """Inline style for the header's ENF status dot, sourced from
-    operator-state-store the same way render_header_frq_multi() is.
-    Reads "enf_status" specifically (not the blended "status" field) --
-    every node in a given tick carries the same enf_status value since
+
+def _current_enf_label(state: dict) -> str:
+    """The current ENF status label ("good"/"suspect"/"warning"/"--"),
+    read from operator-state-store the same way render_header_frq_multi()
+    reads frq_hz -- "enf_status" specifically (not the blended "status"
+    field), and every node in a given tick carries the same value since
     it's facility-wide, so the first one present is representative.
-    Returned as a plain style dict, not a full replacement -- Dash merges
-    this into the element's existing className-driven styling (e.g. the
-    pulse animation), it doesn't remove it."""
+    Shared by both render_header_frq_dot_style() and
+    render_header_frq_bubble_style() so they can never disagree with each
+    other -- one lookup, two style dicts applied to it."""
     if not state:
-        return _ENF_DOT_DEFAULT_STYLE
+        return "--"
     for data in state.values():
         enf = data.get("enf_status")
         if enf and enf != "--":
-            return _ENF_DOT_STATUS_STYLE.get(enf, _ENF_DOT_DEFAULT_STYLE)
-    return _ENF_DOT_DEFAULT_STYLE
+            return enf
+    return "--"
+
+
+def render_header_frq_dot_style(state: dict) -> dict:
+    """Inline style for the header's ENF status dot. Returned as a plain
+    style dict, not a full replacement -- Dash merges this into the
+    element's existing className-driven styling (e.g. the pulse
+    animation), it doesn't remove it."""
+    return _ENF_DOT_STATUS_STYLE.get(_current_enf_label(state), _ENF_DOT_DEFAULT_STYLE)
+
+
+def render_header_frq_bubble_style(state: dict) -> dict:
+    """Inline style for the WHOLE frq-readout pill/bubble (not just the
+    dot inside it) -- background/border/text color all reflect ENF
+    status. Same source as render_header_frq_dot_style() via
+    _current_enf_label(), so the dot and the bubble around it never show
+    disagreeing colors."""
+    return _ENF_BUBBLE_STATUS_STYLE.get(_current_enf_label(state), _ENF_BUBBLE_DEFAULT_STYLE)
