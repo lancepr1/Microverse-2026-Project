@@ -12,10 +12,20 @@ Blender process running at all.
 """
 import base64
 import os
+import tempfile
 
 from dash import html, dcc, callback, Input, Output, no_update
 
-IMG_PATH    = "/tmp/blender_viewport.png"
+# CHANGED (2026-07): was a hardcoded "/tmp/..." -- /tmp doesn't exist on
+# Windows, which would have silently broken this panel entirely for the
+# new Windows teammate (mtime lookup just always fails -> permanently
+# stuck on "DT loading..."). tempfile.gettempdir() resolves to the
+# correct OS temp directory on Windows/Mac/Linux. MUST match
+# main_run.py's own _capture_viewport() default exactly -- two separate
+# processes (Blender and this dashboard) on the same machine, only
+# working because tempfile.gettempdir() is deterministic per-OS, not
+# because the two files coordinate directly.
+IMG_PATH    = os.path.join(tempfile.gettempdir(), "blender_viewport.png")
 FEED_WIDTH  = 300
 FEED_HEIGHT = 720
 
