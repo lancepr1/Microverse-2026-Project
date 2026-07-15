@@ -6,15 +6,21 @@ of whatever raw node identifier the source data used (e.g. SLURM hostnames
 like "x3105c0s37b0n0").
 
 Each row is one polling interval for the whole rack: shared columns
-("index", "FRQ", and whatever else isn't node-prefixed, e.g. "attack",
-"status") plus one block of "<node_id>_gpu-N[...]" / "<node_id>_cpu-N[...]"
-columns per node. This script never assumes what <node_id> looks like --
-it finds every column matching "<anything>_gpu-N[...]" or
-"<anything>_cpu-N[...]", collects the distinct prefixes, sorts them, and
-renumbers them node00, node01, ... in that sorted order (the same
-alphabetical-by-original-id scheme tools/split_16node.py already uses, so
-numbering stays stable across regeneration). Every other column, and the
-row order, is left untouched.
+("index", "FRQ", "ENF_status", and whatever else isn't node-prefixed, e.g.
+"attack", "status") plus one block of "<node_id>_gpu-N[...]" /
+"<node_id>_cpu-N[...]" / "<node_id>_status" columns per node. Node IDs are
+discovered from the gpu/cpu columns specifically (the only columns
+guaranteed to identify a real node, one per component) --
+CHANGED (2026-07): but the rename itself is now applied to ANY column
+starting with a discovered raw node id, not just the gpu/cpu-shaped ones
+that were used to discover it. This was a real bug: "<node_id>_status" (the
+column Leiva's verification pipeline writes, and the whole reason
+normalization needs to touch it at all) was being silently skipped before,
+left in raw-hostname form even after gpu/cpu columns for that same node got
+renamed -- meaning the dashboard's per-node status lookup could never
+actually find it. See models.py/data_feed.py's own 2026-07 comments for the
+rest of that change (verification status now reads straight from these
+columns, no separate runs/verification.jsonl file involved anymore).
 
 This keeps the dashboard's node-detection regex in data_feed.py
 (_NODE_PREFIX_RE = r"^(node\\d+)_") simple and lets ui/*.py's "Node 00".."Node
@@ -37,6 +43,14 @@ _DEFAULT_PATH = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs" / "for_d
 
 
 def _discover_node_ids(rows: list[dict]) -> list[str]:
+    """Node IDs are discovered from gpu/cpu columns ONLY -- these are the
+    only columns guaranteed to appear exactly once per real node component,
+    so they're the reliable signal. "<node_id>_status" columns share the
+    same prefix but discovering node identity FROM them would be less
+    robust (nothing structurally ties a "_status" suffix to a real node
+    the way "_gpu-N[...]" does) -- so identity comes from gpu/cpu, and the
+    rename below is then applied to every column sharing that identified
+    prefix, gpu/cpu or not."""
     ids = set()
     for row in rows:
         for key in row:
@@ -57,20 +71,44 @@ def normalize(input_path: Path, output_path: Path) -> dict[str, str]:
     raw_ids = _discover_node_ids(rows)
     rename = {raw_id: f"node{i:02d}" for i, raw_id in enumerate(raw_ids)}
 
+    # Longest raw id first -- guards against one raw id being a prefix of
+    # another (not currently a real case with SLURM hostnames, but cheap
+    # insurance now that this matches ANY column starting with a raw id,
+    # not just the narrow gpu/cpu shape that made this a non-issue before).
+    ordered_raw_ids = sorted(rename, key=len, reverse=True)
+
     with open(output_path, "w") as out_fh:
         for row in rows:
             new_row = {}
             for key, value in row.items():
-                match = _NODE_COLUMN_RE.match(key)
-                if match and match.group(1) in rename:
-                    raw_id = match.group(1)
-                    key = rename[raw_id] + key[len(raw_id):]
-                new_row[key] = value
+                new_key = key
+                # CHANGED (2026-07): was `match = _NODE_COLUMN_RE.match(key);
+                # if match and match.group(1) in rename: ...` -- only ever
+                # renamed gpu/cpu-shaped columns. Now renames ANY column
+                # that starts with a discovered raw_id + "_", which is what
+                # actually catches "<raw_id>_status" too.
+                for raw_id in ordered_raw_ids:
+                    if key.startswith(raw_id + "_"):
+                        new_key = rename[raw_id] + key[len(raw_id):]
+                        break
+                new_row[new_key] = value
             out_fh.write(json.dumps(new_row) + "\n")
 
     return rename
 
 
+##############################################################################
+# OBSOLETE (2026-07): no longer called by run_microverse.py's stage 4 --
+# verification status comes directly from for_dashboard.jsonl's own
+# "<node_id>_status"/"ENF_status" columns now (normalized by normalize()
+# above, same as every other node-prefixed column), not from a separate
+# runs/<component_id>/verification.jsonl file whose component_ids needed
+# their own matching rename pass. Left in place, logic unchanged, in case
+# tools/generate_verification.py is ever run standalone for some other
+# reason (e.g. offline debugging) -- but it is not part of the live
+# pipeline anymore. Candidate for removal alongside
+# tools/generate_verification.py itself, as one decision.
+##############################################################################
 def normalize_verification_component_ids(rename: dict[str, str], verification_path: Path) -> int:
     """Rewrites runs/<component_id>/verification.jsonl in place so each
     VerificationResult's component_id (e.g. "rack_00/x3105c0s37b0n0_gpu-0[W]")

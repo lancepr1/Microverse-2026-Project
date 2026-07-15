@@ -4,6 +4,7 @@ import json
 import sys
 import random
 import argparse
+import math
 
 # =====================================================================
 # PATH CONFIGURATION
@@ -13,116 +14,115 @@ DATA_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "../../data/combined"))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 
 # =====================================================================
-# SCENARIO PRESET DICTIONARIES (For Medium & Hard Blind Testing)
+# SCENARIO PRESET DICTIONARIES (3 ENF/ALL, 2 NLR per difficulty tier)
 # =====================================================================
 PRESET_SCENARIOS = {
     2: [  # Medium Scenarios
         {
             "id": "201",
-            "name": "Scenario 201", # GPU bias injection
+            "name": "Scenario 201 (NLR)",  # GPU Bias Injection
             "type": "injection",
             "target_group": "gpus",
             "start_pct": 0.30,
             "end_pct": 0.70,
-            "params": {"type": "bias", "value": 20.0}
+            "params": {"type": "bias", "value": 25.0}
         },
         {
             "id": "202",
-            "name": "Scenario 202", # All value replay attack
-            "type": "replay",
-            "target_group": "all",
-            "start_pct": 0.60,
-            "end_pct": 0.75,
-            "params": {"source_start_pct": 0.10}
+            "name": "Scenario 202 (ENF)",  # Continuous Linear Grid Frequency Drift
+            "type": "drift",
+            "target_group": "frq",
+            "start_pct": 0.20,
+            "end_pct": 0.60,
+            "params": {"type": "additive", "max_value": 0.06}
         },        
         {
             "id": "203",
-            "name": "Scenario 203", # Scaled injection to look like active GPU's are idle
+            "name": "Scenario 203 (NLR)",  # CPU Power Scale Offset
             "type": "injection",
-            "target_group": "gpu_watts", # Optimized to target strictly wattage metrics
-            "start_pct": 0.10,
-            "end_pct": 0.9,
-            "params": {
-                "type": "scale",
-                "value": 0.1216,
-                "condition_type": "over",
-                "conditional_val": 550
-            }
+            "target_group": "cpus",
+            "start_pct": 0.15,
+            "end_pct": 0.85,
+            "params": {"type": "scale", "value": 1.15}
         },
         {
             "id": "204",
-            "name": "Scenario 204", # Conditional fake activity 
-            "type": "injection",  
-            "target_group": "gpus",
-            "start_pct": 0.20,
+            "name": "Scenario 204 (ENF)",  # Anchored Grid Frequency Replay
+            "type": "replay",  
+            "target_group": "frq",
+            "start_pct": 0.40,
             "end_pct": 0.80,
-            "params": {
-                "type": "absolute",  
-                "value": 600.0, 
-                "condition_type": "under", 
-                "condition_val": 200.0
-            }
+            "params": {"source_start_pct": 0.05}
         },
+        {
+            "id": "205",
+            "name": "Scenario 205 (ENF)",  # Jittery Baseline Frequency Shift
+            "type": "injection",
+            "target_group": "frq",
+            "start_pct": 0.25,
+            "end_pct": 0.75,
+            "params": {
+                "type": "bias", 
+                "value": -0.04,
+                "jitter": 0.002
+            }
+        }
     ],
     3: [  # Hard Scenarios
         {
             "id": "301",
-            "name": "Scenario 301", # Slow small drift in cpu usage
+            "name": "Scenario 301 (NLR)",  # Low-amplitude CPU Micro-Drift
             "type": "drift",
             "target_group": "cpus",
-            "start_pct": 0.15,
-            "end_pct": 0.85,
-            "params": {"type": "additive", "max_value": 0.04}
+            "start_pct": 0.10,
+            "end_pct": 0.90,
+            "params": {"type": "additive", "max_value": 0.02} # Hidden underneath baseline noise floor
         },
         {
             "id": "302",
-            "name": "Scenario 302", # Instant 3% CPU increase
-            "type": "injection",
-            "target_group": "cpus",
-            "start_pct": 0.40,
-            "end_pct": 0.55,
-            "params": {"type": "scale", "value": 1.03}
+            "name": "Scenario 302 (ENF)",  # Conditional High-Variance Grid Replay
+            "type": "replay",
+            "target_group": "frq",
+            "start_pct": 0.30,
+            "end_pct": 0.70,
+            "params": {
+                "source_start_pct": 0.02,
+                "condition_type": "above",
+                "condition_val": 60.02
+            }
         },
         {
             "id": "303",
-            "name": "Scenario 303", # Short period masking workload with idle replay
+            "name": "Scenario 303 (NLR)",  # Active Workload Masking (Conditional Power Replay)
             "type": "replay",
-            "target_group": "gpu_watts", # Optimized to target strictly wattage metrics
-            "start_pct": 0.40,
-            "end_pct": 0.43,
+            "target_group": "gpu_watts",
+            "start_pct": 0.20,
+            "end_pct": 0.80,
             "params": {
-                "source_start_pct": 0.01,   
-                "condition_type": "above",  
-                "condition_val": 500.0      
+                "source_start_pct": 0.01,
+                "condition_type": "above",
+                "condition_val": 450.0  # Only replaces active high-load blocks with idle wattage signatures
             }
         },
         {
             "id": "304",
-            "name": "Scenario 304", 
-            "type": "replay",  
-            "target_group": "gpu_watts",
-            "start_pct": 0.10,
-            "end_pct": 0.90,
-            "params": {
-                "source_start_pct": 0.01,   
-                "source_end_pct": 0.03,     
-                "condition_type": "above",  
-                "condition_val": 100.0      
-            }
+            "name": "Scenario 304 (ENF)",  # Microscopic Localized Sector Frequency Drift
+            "type": "drift",
+            "target_group": "frq",
+            "start_pct": 0.15,
+            "end_pct": 0.85,
+            "params": {"type": "additive", "max_value": -0.03}
         },
         {
             "id": "305",
-            "name": "Scenario 305", 
-            "type": "injection",  
-            "target_group": "gpu_watts",
-            "start_pct": 0.10,
-            "end_pct": 0.90,
+            "name": "Scenario 305 (ENF)",  # Total System Replay (NLR Masking and Grid Desynchronization)
+            "type": "replay",
+            "target_group": "all",
+            "start_pct": 0.40,
+            "end_pct": 0.60,
             "params": {
-                "type": "absolute_jitter",  
-                "value": 73.5,              
-                "jitter": 0.6,              
-                "condition_type": "above",  
-                "condition_val": 100.0      
+                "source_start_pct": 0.02,
+                "source_end_pct": 0.22
             }
         }
     ]
@@ -185,12 +185,85 @@ def should_apply_modification(current_val, condition_type, condition_val):
     return False
 
 # =====================================================================
-# PARAMETERIZED ATTACK ENGINES
+# AUTOMATED ENF PROFILER ENGINE (Strictly Causal & Anchored Tracking)
+# =====================================================================
+class ENFProfiler:
+    """
+    Automatically profiles and synthesizes ENF signals from visible FRQ data.
+    Uses incoming active frames as real-time anchors, applying a causal noise 
+    reconstruction filter so the signal fluctuates in perfect phase with the grid.
+    """
+    def __init__(self, causal_history):
+        self.mean = 60.0
+        self.variance = 0.01
+        self.phi = 0.95  # Default temporal correlation factor
+        self.noise_std = 0.005
+        self.profile_data(causal_history)
+
+    def profile_data(self, causal_history):
+        frq_vals = [row["FRQ"] for row in causal_history if "FRQ" in row]
+        n = len(frq_vals)
+
+        if n < 5:
+            return
+
+        # Step 1: Compute historical mean baseline
+        self.mean = sum(frq_vals) / n
+        
+        # Step 2: Extract real-time step-to-step noise dynamics
+        diffs = [frq_vals[t] - frq_vals[t-1] for t in range(1, len(frq_vals))]
+        if diffs:
+            # Profile the high-frequency fluctuation variance
+            self.noise_std = math.sqrt(sum(d**2 for d in diffs) / len(diffs))
+        else:
+            self.noise_std = 0.005
+
+        # Step 3: Compute causal AR1 process drift memory
+        num, den = 0.0, 0.0
+        for t in range(1, len(frq_vals)):
+            prev_dev = frq_vals[t - 1] - self.mean
+            curr_dev = frq_vals[t] - self.mean
+            num += prev_dev * curr_dev
+            den += prev_dev * prev_dev
+
+        if den > 0:
+            self.phi = min(0.99, max(-0.99, num / den))
+        
+        print(f"\n--- CAUSAL ENF ANCHORED PROFILE (Samples: {n}) ---")
+        print(f" * Baseline Grid Target (Mean)  : {self.mean:.4f} Hz")
+        print(f" * Fluctuation Memory (AR1 Phi) : {self.phi:.4f}")
+        print(f" * Systemic Jitter Noise (Std)  : {self.noise_std:.6f}")
+        print(f" -----------------------------------------------------")
+
+    def generate_tracked_step(self, live_val, last_synthetic_val=None):
+        """
+        Anchors the generation directly to the incoming live grid signal (live_val)
+        to mirror real physical fluctuations (going up vs down) perfectly, while
+        applying the profiled high-frequency jitter/measurement noise properties.
+        """
+        if last_synthetic_val is None:
+            # Start aligned with the live reference plus a tiny randomized noise offset
+            return live_val + random.normalvariate(0, self.noise_std * 0.1)
+
+        # Calculate the drift offset of our previous generated point from the true grid
+        live_drift = last_synthetic_val - live_val
+        
+        # Apply the profiled AR(1) decay to correct the drift and keep us tightly bounded to live_val,
+        # then superimpose a physically plausible measurement fluctuation.
+        correction = self.phi * live_drift + random.normalvariate(0, self.noise_std * 0.5)
+        
+        # Bounded guardrail to prevent mathematical accumulation spikes
+        clamped_correction = max(-0.01, min(0.01, correction))
+        
+        return live_val + clamped_correction
+
+# =====================================================================
+# PARAMETERIZED ATTACK ENGINES (Anchored Signal Synthesis Integration)
 # =====================================================================
 def apply_no_change(data):
     return [row.copy() for row in data], [0] * len(data)
 
-def apply_replay_attack(data, start, end, total_rows, params, condition_type=None, condition_val=None, targets=None):
+def apply_replay_attack(data, start, end, total_rows, params, condition_type=None, condition_val=None, targets=None, profiler=None):
     modified_data, attack_labels = [], []
     
     source_start_pct = params.get("source_start_pct", 0.0)
@@ -205,6 +278,8 @@ def apply_replay_attack(data, start, end, total_rows, params, condition_type=Non
     if source_window_len <= 0:
         source_window_len = 1  
 
+    last_frq_val = None
+
     for i, row in enumerate(data):
         new_row = row.copy()
         is_attack = 0
@@ -214,21 +289,30 @@ def apply_replay_attack(data, start, end, total_rows, params, condition_type=Non
                 source_row = data[source_idx]
                 for key in row.keys():
                     if key != "index" and key in source_row and isinstance(row[key], (int, float)):
-                        # If targeting a sub-group, bypass columns that aren't inside our targets list
                         if targets is not None and key not in targets:
                             continue
                         if should_apply_modification(row[key], condition_type, condition_val):
-                            new_row[key] = source_row[key]
                             is_attack = 1
+                            if key == "FRQ" and profiler is not None:
+                                # Synthesize continuous causal wave anchored to the LIVE incoming grid frame
+                                if last_frq_val is None:
+                                    last_frq_val = row["FRQ"]
+                                synthesized_frq = profiler.generate_tracked_step(row["FRQ"], last_frq_val)
+                                new_row["FRQ"] = synthesized_frq
+                                last_frq_val = synthesized_frq
+                            else:
+                                new_row[key] = source_row[key]
         modified_data.append(new_row)
         attack_labels.append(is_attack)
     return modified_data, attack_labels
 
-def apply_injection_attack(data, start, end, targets, params, condition_type=None, condition_val=None):
+def apply_injection_attack(data, start, end, targets, params, condition_type=None, condition_val=None, profiler=None):
     modified_data, attack_labels = [], []
     injection_type = params.get("type", "bias")
     value = params.get("value", 0.0)
     jitter_amt = params.get("jitter", 0.5)
+
+    last_frq_val = None
 
     for i, row in enumerate(data):
         new_row = row.copy()
@@ -238,24 +322,40 @@ def apply_injection_attack(data, start, end, targets, params, condition_type=Non
                 if col in new_row and isinstance(new_row[col], (int, float)):
                     if should_apply_modification(new_row[col], condition_type, condition_val):
                         is_attack = 1
-                        if injection_type == "bias":
-                            new_row[col] += value
-                        elif injection_type == "scale":
-                            new_row[col] *= value
-                        elif injection_type == "absolute":
-                            new_row[col] = value  
-                        elif injection_type == "absolute_jitter":
-                            new_row[col] = value + random.uniform(-jitter_amt, jitter_amt)
+                        if col == "FRQ" and profiler is not None:
+                            if last_frq_val is None:
+                                last_frq_val = row["FRQ"]
+                            synthesized_frq = profiler.generate_tracked_step(row["FRQ"], last_frq_val)
+                            
+                            # Apply targeted bias offset or scaling factors to the anchored synthetic signal
+                            if injection_type == "bias":
+                                synthesized_frq += value
+                            elif injection_type == "scale":
+                                synthesized_frq *= value
+                                
+                            new_row["FRQ"] = synthesized_frq
+                            last_frq_val = synthesized_frq
+                        else:
+                            if injection_type == "bias":
+                                new_row[col] += value
+                            elif injection_type == "scale":
+                                new_row[col] *= value
+                            elif injection_type == "absolute":
+                                new_row[col] = value  
+                            elif injection_type == "absolute_jitter":
+                                new_row[col] = value + random.uniform(-jitter_amt, jitter_amt)
         modified_data.append(new_row)
         attack_labels.append(is_attack)
     return modified_data, attack_labels
 
-def apply_drift_attack(data, start, end, targets, params, condition_type=None, condition_val=None):
+def apply_drift_attack(data, start, end, targets, params, condition_type=None, condition_val=None, profiler=None):
     modified_data, attack_labels = [], []
     drift_type = params.get("type", "additive")
     max_value = params.get("max_value", 0.0)
     duration = end - start if (end - start) > 0 else 1
     
+    last_frq_val = None
+
     for i, row in enumerate(data):
         new_row = row.copy()
         is_attack = 0
@@ -265,10 +365,24 @@ def apply_drift_attack(data, start, end, targets, params, condition_type=None, c
                 if col in new_row and isinstance(new_row[col], (int, float)):
                     if should_apply_modification(new_row[col], condition_type, condition_val):
                         is_attack = 1
-                        if drift_type == "additive":
-                            new_row[col] += max_value * factor
-                        elif drift_type == "multiplicative":
-                            new_row[col] *= (1.0 + (max_value * factor))
+                        if col == "FRQ" and profiler is not None:
+                            if last_frq_val is None:
+                                last_frq_val = row["FRQ"]
+                            synthesized_frq = profiler.generate_tracked_step(row["FRQ"], last_frq_val)
+                            
+                            # Add a slow, linear drift onto the anchored synthetic signal
+                            if drift_type == "additive":
+                                synthesized_frq += max_value * factor
+                            elif drift_type == "multiplicative":
+                                synthesized_frq *= (1.0 + (max_value * factor))
+                                
+                            new_row["FRQ"] = synthesized_frq
+                            last_frq_val = synthesized_frq
+                        else:
+                            if drift_type == "additive":
+                                new_row[col] += max_value * factor
+                            elif drift_type == "multiplicative":
+                                new_row[col] *= (1.0 + (max_value * factor))
         modified_data.append(new_row)
         attack_labels.append(is_attack)
     return modified_data, attack_labels
@@ -277,7 +391,6 @@ def apply_drift_attack(data, start, end, targets, params, condition_type=None, c
 # MAIN RUNNER EXECUTION
 # =====================================================================
 def main():
-    # Setup command line argument parser
     parser = argparse.ArgumentParser(description="Inject anomaly scenarios into dynamic telemetry datasets.")
     parser.add_argument(
         "--nodes", 
@@ -287,7 +400,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Construct file path using dynamically provided nodes count
     input_file = os.path.join(DATA_DIR, f"run_{args.nodes}node.jsonl")
 
     if not os.path.exists(input_file):
@@ -358,7 +470,7 @@ def main():
             tgt_map = {1: "frq", 2: "gpus", 3: "gpu_watts", 4: "gpu_temps", 5: "cpus", 6: "all"}
             target_group = tgt_map.get(tgt_choice, "all")
 
-            start_pct, end_pct = 0.10, 0.60
+            start_pct, end_pct = 0.01, 0.60
             
             if selected_mode == "extreme_shortcut":
                 attack_type = "injection"
@@ -396,11 +508,34 @@ def main():
                 run_params = {"type": "additive", "max_value": 50.0}
 
     # -----------------------------------------------------------------
-    # PATHWAY B: MEDIUM / HARD MODE (Automated Scenarios)
+    # PATHWAY B: MEDIUM / HARD MODE (Filtered ENF vs. NLR Presets)
     # -----------------------------------------------------------------
     else:
+        print("\nSelect Scenario Focus Area:")
+        print(" [1] ENF Attacks (Electrical Network Frequency - FRQ & Grid Focus)")
+        print(" [2] NLR Attacks (Node Local Representation - Server GPU/CPU Focus)")
+        try:
+            focus_choice = int(input("Select Option (1-2): "))
+        except ValueError:
+            focus_choice = 1
+
         scenarios_pool = PRESET_SCENARIOS.get(difficulty, PRESET_SCENARIOS[2])
-        chosen_scenario = random.choice(scenarios_pool)
+        
+        # Categorization filter based on targeted groups
+        filtered_pool = []
+        for s in scenarios_pool:
+            is_enf_target = s["target_group"] in ["frq", "all"]
+            if focus_choice == 1 and is_enf_target:
+                filtered_pool.append(s)
+            elif focus_choice == 2 and not is_enf_target:
+                filtered_pool.append(s)
+
+        # Fallback to absolute pool if filtered category is empty
+        if not filtered_pool:
+            print("-> Note: Focus specific scenario was empty, falling back to full difficulty pool.")
+            filtered_pool = scenarios_pool
+
+        chosen_scenario = random.choice(filtered_pool)
         
         output_id = chosen_scenario["id"]
         print(f"\n>>> Launching Blind Evaluation Run: {chosen_scenario['name']} <<<")
@@ -411,24 +546,33 @@ def main():
         end_pct = chosen_scenario["end_pct"]
         run_params = chosen_scenario["params"]
 
-    # -----------------------------------------------------------------
-    # EXECUTION OF MATH ENGINE PIPELINE
-    # -----------------------------------------------------------------
+    # Calculate exact frame boundaries
     start_idx = int(total_rows * start_pct)
     end_idx = int(total_rows * end_pct)
     targets = schema.get(target_group, schema["all"])
 
+    # -----------------------------------------------------------------
+    # STRICT CAUSAL PROFILING CALIBRATION
+    # -----------------------------------------------------------------
+    # The profiler is strictly prohibited from viewing future frames.
+    # It can only calibrate its variance and memory properties from data[0:start_idx].
+    causal_history_slice = data[:start_idx]
+    profiler = ENFProfiler(causal_history_slice)
+
     c_type = run_params.get("condition_type", None)
     c_val = run_params.get("condition_val", run_params.get("conditional_val", None))
 
+    # -----------------------------------------------------------------
+    # EXECUTION OF PIPELINE
+    # -----------------------------------------------------------------
     if attack_type == "none":
         modified_data, attack_labels = apply_no_change(data)
     elif attack_type == "replay":
-        modified_data, attack_labels = apply_replay_attack(data, start_idx, end_idx, total_rows, run_params, c_type, c_val, targets=targets)
+        modified_data, attack_labels = apply_replay_attack(data, start_idx, end_idx, total_rows, run_params, c_type, c_val, targets=targets, profiler=profiler)
     elif attack_type == "injection":
-        modified_data, attack_labels = apply_injection_attack(data, start_idx, end_idx, targets, run_params, c_type, c_val)
+        modified_data, attack_labels = apply_injection_attack(data, start_idx, end_idx, targets, run_params, c_type, c_val, profiler=profiler)
     elif attack_type == "drift":
-        modified_data, attack_labels = apply_drift_attack(data, start_idx, end_idx, targets, run_params, c_type, c_val)
+        modified_data, attack_labels = apply_drift_attack(data, start_idx, end_idx, targets, run_params, c_type, c_val, profiler=profiler)
 
     # -----------------------------------------------------------------
     # OUTPUT GENERATION (With Dynamic Precision Guard)
@@ -440,7 +584,6 @@ def main():
     print(f"\nWriting files to: '{OUTPUT_DIR}'...")
     with open(output_main, "w") as f_main, open(output_check, "w") as f_check:
         for row, is_attack in zip(modified_data, attack_labels):
-            # Formatted inline guard to preserve raw FRQ float data
             formatted_row = {
                 k: (v if k == "FRQ" else (round(v, 1) if "uJ" in k else round(v, 4))) if isinstance(v, float) else v 
                 for k, v in row.items()
@@ -450,6 +593,17 @@ def main():
             
             check_row = formatted_row.copy()
             check_row["attack"] = is_attack
+            
+            # Dynamic Multi-Layer targeting status generation:
+            # 1. ENF Layer (targeted if 'FRQ' is in targets list)
+            is_enf_targeted = "FRQ" in targets
+            check_row["ENF_attack"] = 1 if (is_attack == 1 and is_enf_targeted) else 0
+            
+            # 2. Node Level Layers (dynamic tracking across all cluster nodes)
+            for node_id in schema["discovered_nodes"]:
+                is_node_targeted = any(t.startswith(node_id + "_") for t in targets)
+                check_row[f"{node_id}_attack"] = 1 if (is_attack == 1 and is_node_targeted) else 0
+
             f_check.write(json.dumps(check_row) + "\n")
 
     print(f"Successfully generated 'attack_{output_id}.jsonl' and validation blueprint.")

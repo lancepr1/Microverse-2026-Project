@@ -2,8 +2,8 @@
 ui/alert_log.py — the Alert log tab: a filterable alert-episode timeline
 (Section 1) and a 16-node anomaly summary table (Section 2), both sourced
 from alert_log.py's session bookkeeping. See that module's docstring for
-why alert_type and prediction are placeholders rather than live-computed
-values, and for how consecutive same-node/same-severity samples collapse
+what counts as an "alert" and how the attack-vector label is derived,
+and for how consecutive same-node/same-severity samples collapse
 into one "episode" row so a long-running alert doesn't bury the timeline
 in duplicates.
 
@@ -124,7 +124,7 @@ def render_alert_timeline(severity: str = "All", node_id: str = "All") -> html.D
     header = html.Tr([
         html.Th("Start"), html.Th("End"), html.Th("Rack"), html.Th("Node"),
         html.Th("Severity"), html.Th("Attack Vector"), html.Th("Samples"),
-        html.Th("Power"), html.Th("GPU Temp"), html.Th("Prediction"),
+        html.Th("Power"), html.Th("GPU Temp"),
     ])
     body_rows = [
         html.Tr([
@@ -139,7 +139,6 @@ def render_alert_timeline(severity: str = "All", node_id: str = "All") -> html.D
             html.Td(str(ep["sample_count"])),
             html.Td(f"{ep['total_power_w']:.1f} W" if ep.get("total_power_w") is not None else "--"),
             html.Td(f"{ep['average_gpu_temp_c']:.1f} °C" if ep.get("average_gpu_temp_c") is not None else "--"),
-            html.Td(ep["prediction"]),
         ])
         for ep in rows
     ]

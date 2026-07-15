@@ -32,17 +32,48 @@ STATUS OF EACH STAGE (2026-07):
                                    intermediate "anchor_verified.jsonl"
                                    file, since all three destinations
                                    were always identical copies of it
-                                   anyway. for_digital_twin.jsonl is now
+                                   anyway. for_digital_twin.jsonl is
                                    genuinely consumed by Baron's
-                                   main_run.py (stage 4 below). Also
-                                   writes runs/<component_id>/verification.jsonl
-                                   with real per-node/per-metric detail
-                                   for the dashboard's verification_feed.py,
-                                   and normalizes node ids in for_dashboard.jsonl
-                                   and verification.jsonl to the "node00"
-                                   style the dashboard expects -- see this
-                                   function's docstring below.
-    Stage 4 (launch digital twin): REAL. Launches Blender with
+                                   main_run.py (stage 5 below).
+                                   for_dashboard.jsonl is consumed
+                                   DIRECTLY by McCray's dashboard --
+                                   data_feed.py reads its raw hostname
+                                   node-id columns as-is now (see the
+                                   removed Stage 4 note below), no
+                                   normalization step exists anywhere in
+                                   this pipeline anymore.
+    REMOVED (2026-07, cleanup pass): there used to be a Stage 4 here that
+                                   normalized for_dashboard.jsonl's
+                                   node-id columns to a node00..nodeNN
+                                   format via McCray's
+                                   tools/normalize_node_ids.py (and,
+                                   before that, also ran a second
+                                   Verifier pass via
+                                   tools/generate_verification.py -- see
+                                   git history for that whole saga, not
+                                   repeated here). Both are gone: 
+                                   data_feed.py's node discovery now
+                                   reads real hostnames directly from
+                                   for_dashboard.jsonl (the same
+                                   gpu/cpu-column-based discovery
+                                   normalize_node_ids.py used to use, just
+                                   without a rename step after it), so
+                                   there is nothing left to normalize.
+                                   tools/normalize_node_ids.py,
+                                   tools/generate_verification.py, and
+                                   verification_feed.py have been deleted
+                                   from lanes/mccray_dashboard/ entirely --
+                                   not just marked obsolete anymore.
+    Stage 4 (launch dashboard):   Launches McCray's Dash app
+                                   (lanes/mccray_dashboard/dashboard/
+                                   main.py) as a background process --
+                                   non-blocking, since stage 5 (Blender)
+                                   blocks until the viewport window is
+                                   closed and both need to run at once.
+                                   Terminated in main()'s finally block
+                                   when Blender exits, so it never
+                                   orphans.
+    Stage 5 (launch digital twin): REAL. Launches Blender with
                                    main_run.py, which reads
                                    for_digital_twin.jsonl (just written
                                    by stage 3) and plays it back live,
@@ -91,7 +122,9 @@ import os
 import json
 import random
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Lives in scripts/run_microverse.py -- one level below repo root, so
@@ -100,6 +133,23 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "lanes" / "leiva_verification"))
+
+# McCray's dashboard lane -- _DASHBOARD_DIR is where main.py/data_feed.py
+# live (confirmed by triangulating data_feed.py's own "../../leiva_verification"
+# path math against the repo-root math the (now-deleted)
+# tools/generate_verification.py used, not guessed). Never imported here --
+# McCray's dashboard package must stay importable standalone with no
+# sibling-lane code present (see that package's own coupling-guard test),
+# so this script only ever launches it as a subprocess.
+#
+# REMOVED (2026-07, cleanup pass): _DASHBOARD_TOOLS_DIR and its sys.path
+# insert. This script used to import tools/normalize_node_ids.py for a
+# now-deleted node-id normalization stage -- data_feed.py discovers real
+# node ids directly from for_dashboard.jsonl now, so there's nothing left
+# in lanes/mccray_dashboard/tools/ for this script to call at all (that
+# whole directory has been deleted from the dashboard lane).
+_MCCRAY_DASHBOARD_ROOT = _REPO_ROOT / "lanes" / "mccray_dashboard"
+_DASHBOARD_DIR = _MCCRAY_DASHBOARD_ROOT / "dashboard"
 
 from microverse_core.data_loaders import (
     load_enf,
@@ -110,6 +160,25 @@ from microverse_core.data_loaders import (
     write_combined_jsonl,
     read_combined_jsonl,
 )
+
+# CHANGED (2026-07): the "[N/5] doing X ..." progress narration scattered
+# through every stage below was genuinely useful while the dashboard
+# wasn't wired up yet -- it was the only visibility into what the
+# pipeline was doing. Now that the dashboard shows live results as soon
+# as it launches, that narration is redundant console noise. Gated behind
+# VERBOSE (default off) instead of deleted outright, so a future bug can
+# get that visibility back with a one-line flip instead of re-adding
+# print statements throughout the file. WARNING lines, the interactive
+# prompts in gather_inputs(), and the dashboard-shutdown notice at the
+# end of main() are deliberately NOT gated -- those indicate a real
+# problem, are part of the actual interactive UI, or explain an
+# otherwise-silent side effect, not routine status.
+VERBOSE = False
+
+
+def vprint(*args, **kwargs) -> None:
+    if VERBOSE:
+        print(*args, **kwargs)
 
 
 def prompt_choice(prompt_text: str, options: list) -> str:
@@ -317,7 +386,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
     of an attack silently erases it with zero detection. This is the
     one ordering rule in the whole pipeline that must never move.
     """
-    print(f"[1/4] Ingesting ENF from {args.enf_path} ...")
+    vprint(f"[1/5] Ingesting ENF from {args.enf_path} ...")
     enf = load_enf(args.enf_path)
     enf = combined_smooth(enf)
 
@@ -340,7 +409,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
         v + _enf_noise_rng.gauss(0, ENF_ALT_NOISE_STD) for v in enf
     ]
 
-    print(f"[1/4] Discovering NLR pairs in {args.nlr_folder} "
+    vprint(f"[1/5] Discovering NLR pairs in {args.nlr_folder} "
           f"(workload_type={args.workload_type}) ...")
     slurm_id = args.slurm_id if args.workload_type == "training" else None
     pairs = discover_nlr_pairs(args.nlr_folder, slurm_id=slurm_id)
@@ -349,7 +418,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
         pairs = [p for p in pairs if p[0] in args.node_ids]
         missing = set(args.node_ids) - {p[0] for p in pairs}
         if missing:
-            print(f"[1/4] WARNING: requested node IDs not found: {missing}")
+            print(f"[1/5] WARNING: requested node IDs not found: {missing}")
     elif args.node_count:
         pairs = sorted(pairs, key=lambda p: p[0])[:args.node_count]
 
@@ -359,7 +428,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
             "and --slurm-id are all correct for this run."
         )
 
-    print(f"[1/4] Using {len(pairs)} node(s): {sorted(p[0] for p in pairs)}")
+    vprint(f"[1/5] Using {len(pairs)} node(s): {sorted(p[0] for p in pairs)}")
     node_windows = load_nlr_multi(pairs)
     records = build_combined_records(enf, node_windows)
 
@@ -379,7 +448,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
     out_path = Path(args.output_dir) / f"{out_filename}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_combined_jsonl(records, str(out_path))
-    print(f"[1/4] Wrote {len(records)} records -> {out_path}")
+    vprint(f"[1/5] Wrote {len(records)} records -> {out_path}")
     return out_path
 
 
@@ -442,9 +511,9 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
 
     node_count = args.actual_node_count
 
-    print(f"[2/4] Launching attack.py --nodes {node_count} "
+    vprint(f"[2/5] Launching attack.py --nodes {node_count} "
           f"(reads {clean_path}) ...")
-    print(f"[2/4] attack.py has its own interactive prompts -- answer those directly below.\n")
+    vprint(f"[2/5] attack.py has its own interactive prompts -- answer those directly below.\n")
     subprocess.run(
         ["python", "lanes/marchisano_attacks/attack.py", "--nodes", str(node_count)],
         check=True,
@@ -467,7 +536,7 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
             f"current behavior."
         )
     if len(new_files) > 1:
-        print(f"[2/4] WARNING: multiple files modified at once: "
+        print(f"[2/5] WARNING: multiple files modified at once: "
               f"{sorted(new_files)} -- using the most recently modified one, "
               f"but this ambiguity is worth understanding, not just working around.")
 
@@ -491,7 +560,7 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
             f"verifier actually processes."
         )
 
-    print(f"[2/4] attack.py finished -> {plain_path} (fed to verifier)")
+    vprint(f"[2/5] attack.py finished -> {plain_path} (fed to verifier)")
     return plain_path
 
 
@@ -523,38 +592,14 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     consistent with the rest of the project rather than inventing a
     new parsing rule.
 
-    Also collects every VerificationResult verifier.verify() returns
-    (per-node, per-metric -- see verification.py's merged NLR/GPU
-    checks), not just the collapsed worst-of status above, and writes
-    them to runs/<component_id>/verification.jsonl so the dashboard's
-    verification_feed.py has real per-node detail to read instead of
-    falling back to "--" for every sample -- see PIPELINE_SETUP.txt /
-    McCray's dashboard lane for the reader side.
-
-    Destinations (lanes/leiva_verification/outputs/):
+    PLACEHOLDER destinations -- currently just three real files with
+    identical content:
         for_scoreboard.jsonl
         for_dashboard.jsonl
         for_digital_twin.jsonl
     Replace with the real dashboard/digital-twin integration once
     their expected interface (file path? socket? HTTP endpoint?) is
     confirmed with McCray/Baron.
-
-    NORMALIZATION: the pipeline's node columns are named after whatever
-    raw identifier the source data used (e.g. SLURM hostnames like
-    "x3105c0s37b0n0"), but the dashboard's node-detection only
-    recognizes "node00".."nodeNN" naming (see
-    lanes/mccray_dashboard/dashboard/data_feed.py's _NODE_PREFIX_RE).
-    Without this step, every dashboard run after a fresh pipeline run
-    would show 0 nodes and the Operator tab's per-node callbacks would
-    error with "Callback error with no output from input" (no node-card
-    components to route the output to). runs/<component_id>/verification.jsonl
-    is normalized the same way, using this exact same rename mapping --
-    its VerificationResult.component_id values embed the same raw node
-    identifiers for_dashboard.jsonl just had renamed, since both come
-    from the same source recording. Without this, the dashboard's
-    per-node status lookup (verification_feed.py) would never match
-    anything, because it looks for the "node00"-style ids, not the raw
-    ones.
 
     Ground truth is never included here -- verifies attacked_path,
     which is the PLAIN file with no "attack" column (see stage_2).
@@ -563,12 +608,8 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     """
     from anchor import AnchorExtractor
     from verification import Verifier
-    from microverse_core.io_records import write_records
-    sys.path.insert(0, str(_REPO_ROOT / "lanes" / "mccray_dashboard" / "tools"))
-    from normalize_node_ids import normalize as normalize_node_ids
-    from normalize_node_ids import normalize_verification_component_ids
 
-    print(f"[3/4] Verifying {attacked_path} ...")
+    vprint(f"[3/5] Verifying {attacked_path} ...")
     records = list(read_combined_jsonl(str(attacked_path)))
     enf_list = [r["FRQ"] for r in records]
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
@@ -600,7 +641,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         (k.split("_gpu")[0] if "_gpu" in k else k.split("_cpu")[0])
         for k in sample_keys if "_gpu" in k or "_cpu" in k
     })
-    print(f"[3/4] {len(node_ids)} node column(s): {node_ids}")
+    vprint(f"[3/5] {len(node_ids)} node column(s): {node_ids}")
 
     out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -611,12 +652,6 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     }
     handles = {name: open(path, "w") for name, path in destinations.items()}
 
-    # Every VerificationResult verifier.verify() returns (per-node,
-    # per-metric), not just the collapsed worst-of status written to
-    # the destinations above -- collected here and written to
-    # runs/<component_id>/verification.jsonl once the loop below finishes.
-    all_results = []
-
     try:
         for record in records:
             scoreboard_record = dict(record)
@@ -626,7 +661,6 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
             record["timestamp"] = float(record["index"]) / 0.5
             anchor = extractor.extract(record["timestamp"])
             results = verifier.verify(record, anchor)
-            all_results.extend(results)
 
             enf_status = "trusted"
             node_status = {nid: "trusted" for nid in node_ids}
@@ -651,21 +685,75 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         for fh in handles.values():
             fh.close()
 
-    verification_path = write_records(args.component_id, "verification", all_results)
-
-    rename = normalize_node_ids(destinations["dashboard"], destinations["dashboard"])
-    normalize_verification_component_ids(rename, Path(verification_path))
-
-    print(f"[3/4] Wrote {len(records)} verified records to 3 destinations:")
+    vprint(f"[3/5] Wrote {len(records)} verified records to 3 destinations:")
     for name, dest in destinations.items():
-        print(f"       {name:14s} -> {dest}")
-    print(f"[3/4] Wrote {len(all_results)} per-component verification results -> {verification_path}")
-    if rename:
-        print(f"[3/4] Normalized {len(rename)} node id(s) in for_dashboard.jsonl "
-              f"and verification.jsonl for the dashboard (e.g. {next(iter(rename.items()))})")
+        vprint(f"       {name:14s} -> {dest}")
 
 
-def stage_4_launch_digital_twin() -> None:
+def stage_4_launch_dashboard():
+    """
+    Launches McCray's Dash app (lanes/mccray_dashboard/dashboard/main.py)
+    as a background process -- non-blocking, via Popen rather than run(),
+    since stage 5 (Blender) blocks the main thread until its viewport
+    window is closed and both processes need to be alive at the same
+    time. Returns the Popen handle so main() can terminate it cleanly
+    once Blender exits, rather than leaving an orphaned dashboard server
+    running after the pipeline itself has finished.
+
+    Launched with cwd=_DASHBOARD_DIR (not _REPO_ROOT) -- main.py's own
+    imports (ui.layout, data_feed, etc.) are relative to that directory,
+    the same way attack.py's and main_run.py's relative paths require
+    cwd=_REPO_ROOT for THEM specifically in stages 2 and 5.
+
+    REMOVED (2026-07, cleanup pass): the normalization stage that used to
+    run before this one is gone entirely -- data_feed.py now discovers
+    real node ids directly from for_dashboard.jsonl's own raw hostname
+    column prefixes (e.g. "x3105c0s37b0n0_gpu-0[W]"), so there's nothing
+    left for this pipeline to prepare before launching the dashboard.
+    tools/normalize_node_ids.py, tools/generate_verification.py, and
+    verification_feed.py have all been deleted from the dashboard lane to
+    match (not just marked obsolete anymore).
+
+    FIXED (2026-07, after a real run): a Popen() call returning
+    successfully only means the process SPAWNED, not that it stayed
+    alive -- a real run hit this exact gap: main.py crashed immediately
+    on `ModuleNotFoundError: No module named 'dash'` (dependencies not
+    installed in this environment), but the pipeline printed "Dashboard
+    launched" anyway and carried on into Blender with a dead dashboard
+    process in the background. DASHBOARD_STARTUP_GRACE_S gives the
+    process a moment to either crash (common: missing deps, port already
+    held by a stale process from a previous run -- see McCray's own
+    dashboard README step 11) or survive; if it's already dead by then,
+    this raises instead of returning a stale, misleading "success".
+    """
+    DASHBOARD_STARTUP_GRACE_S = 1.5
+
+    vprint(f"[4/5] Launching dashboard (lanes/mccray_dashboard/dashboard/main.py) ...")
+    process = subprocess.Popen(
+        [sys.executable, "main.py"],
+        cwd=str(_DASHBOARD_DIR),
+    )
+
+    time.sleep(DASHBOARD_STARTUP_GRACE_S)
+    if process.poll() is not None:
+        raise RuntimeError(
+            f"[4/5] Dashboard process exited immediately (code "
+            f"{process.returncode}) -- see the traceback printed above "
+            f"for the real cause. Two common ones: (1) dashboard "
+            f"dependencies aren't installed in this environment -- "
+            f"`source .venv/bin/activate && pip install -r requirements.txt` "
+            f"from the repo root, then re-run; (2) a stale dashboard "
+            f"process from a previous run is still holding the port -- "
+            f"`pkill -9 -f main.py` first, then re-run."
+        )
+
+    vprint(f"[4/5] Dashboard launched (pid={process.pid}) -- see main.py's own "
+          f"app.run() call for the port (Dash defaults to 127.0.0.1:8050 "
+          f"unless that's been changed).")
+    return process
+
+
+def stage_5_launch_digital_twin() -> None:
     """
     Launches Blender with main_run.py (repo root -- Baron's
     lane), which reads for_digital_twin.jsonl (just written by stage 3)
@@ -681,11 +769,14 @@ def stage_4_launch_digital_twin() -> None:
     (remembers the last-used path across runs) -- inherits this
     process's stdin/stdout so that prompt works correctly, same pattern
     already used for attack.py's own interactive prompts in stage_2.
-    """
-    import subprocess
 
-    print(f"[4/4] Launching Blender with the digital twin ...")
-    print(f"[4/4] main_run.py has its own prompt for the .blend file path -- answer that directly below.\n")
+    Still a BLOCKING call (subprocess.run, not Popen) -- this is
+    deliberately the last thing main() does, so the pipeline "finishes"
+    exactly when the person closes the Blender window, matching how it
+    behaved before the dashboard was added.
+    """
+    vprint(f"[5/5] Launching Blender with the digital twin ...")
+    vprint(f"[5/5] main_run.py has its own prompt for the .blend file path -- answer that directly below.\n")
     subprocess.run(
         ["blender", "--python", "main_run.py"],
         check=True,
@@ -698,7 +789,20 @@ def main():
     clean_path = stage_1_ingest_and_smooth(args)
     attacked_path = stage_2_inject_attacks(clean_path, args)
     stage_3_verify_and_fork(attacked_path, args)
-    stage_4_launch_digital_twin()
+
+    dashboard_process = stage_4_launch_dashboard()
+    try:
+        stage_5_launch_digital_twin()
+    finally:
+        # Blender closed (or crashed/raised) -- don't leave the dashboard
+        # server running as an orphaned background process either way.
+        if dashboard_process.poll() is None:
+            print("[5/5] Blender exited -- stopping the dashboard process ...")
+            dashboard_process.terminate()
+            try:
+                dashboard_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dashboard_process.kill()
 
 
 if __name__ == "__main__":

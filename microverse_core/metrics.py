@@ -126,57 +126,60 @@ def calculate_time_to_detection(truth_list, pred_list):
 # =====================================================================
 # DASHBOARD RENDERING LAYOUT
 # =====================================================================
-def print_evaluation_dashboard(scenario_id, truth_file, detector_file, strict_m, lenient_m, strict_ttd, lenient_ttd):
+def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_by_layer):
     """
-    Generates a structured, unified diagnostics panel to compare framework performance.
+    Generates a structured, unified diagnostics panel comparing framework performance.
     """
-    print("=" * 70)
-    print(f" DETECTOR PERFORMANCE EVALUATION REPORT: SCENARIO {scenario_id}")
-    print("=" * 70)
+    print("=" * 80)
+    print(f"       MULTI-LAYER DETECTOR EVALUATION REPORT: SCENARIO {scenario_id}")
+    print("=" * 80)
     print(f"Ground Truth Reference : {os.path.basename(truth_file)}")
     print(f"Detector Output Source : {os.path.basename(detector_file)}")
-    print("-" * 70)
+    print("=" * 80)
     
-    # Unified Columns Template
-    row_fmt = " {:<28} | {:<18} | {:<18}"
-    print(row_fmt.format("Metric Parameter", "Strict Mode (1.0)", "Lenient Mode (>=0.5)"))
-    print("-" * 70)
+    for layer_name, data in results_by_layer.items():
+        strict_m = data["strict_m"]
+        lenient_m = data["lenient_m"]
+        strict_ttd = data["strict_ttd"]
+        lenient_ttd = data["lenient_ttd"]
+        
+        print(f"\n >>> LAYER: {layer_name} <<<")
+        print("-" * 80)
+        row_fmt = " {:<28} | {:<22} | {:<22}"
+        print(row_fmt.format("Metric Parameter", "Strict Mode (1.0)", "Lenient Mode (>=0.5)"))
+        print("-" * 80)
+        print(row_fmt.format("True Positives (TP)", strict_m["tp"], lenient_m["tp"]))
+        print(row_fmt.format("False Positives (FP)", strict_m["fp"], lenient_m["fp"]))
+        print(row_fmt.format("True Negatives (TN)", strict_m["tn"], lenient_m["tn"]))
+        print(row_fmt.format("False Negatives (FN)", strict_m["fn"], lenient_m["fn"]))
+        print("-" * 80)
+        print(row_fmt.format("Precision", f"{strict_m['precision']:.4%}", f"{lenient_m['precision']:.4%}"))
+        print(row_fmt.format("Recall (Sensitivity)", f"{strict_m['recall']:.4%}", f"{lenient_m['recall']:.4%}"))
+        print(row_fmt.format("F1-Score", f"{strict_m['f1']:.4%}", f"{lenient_m['f1']:.4%}"))
+        print(row_fmt.format("False Positive Rate (FPR)", f"{strict_m['fpr']:.4%}", f"{lenient_m['fpr']:.4%}"))
+        print("-" * 80)
+        
+        # Print latency profiles if attack windows were found
+        if strict_ttd:
+            print(" Latency Profiles: Time-To-Detection (TTD)")
+            ttd_fmt = "   Window #{:<2} [Frames {:>4}-{:<4}] | Strict TTD: {:<12} | Lenient TTD: {:<12}"
+            for s_t, l_t in zip(strict_ttd, lenient_ttd):
+                s_val = f"{s_t['ttd']} frames" if isinstance(s_t['ttd'], int) else s_t['ttd']
+                l_val = f"{l_t['ttd']} frames" if isinstance(l_t['ttd'], int) else l_t['ttd']
+                print(ttd_fmt.format(s_t['window'], s_t['start'], s_t['end'], s_val, l_val))
+            
+            s_valid = [x['ttd'] for x in strict_ttd if isinstance(x['ttd'], int)]
+            l_valid = [x['ttd'] for x in lenient_ttd if isinstance(x['ttd'], int)]
+            s_avg = f"{sum(s_valid)/len(s_valid):.2f} frames" if s_valid else "N/A"
+            l_avg = f"{sum(l_valid)/len(l_valid):.2f} frames" if l_valid else "N/A"
+            print(f"   Average Response Delay   | Strict Avg: {s_avg:<10} | Lenient Avg: {l_avg:<10}")
+        else:
+            print(" Latency Profiles: No active attack windows registered on this layer.")
+        print("-" * 80)
     
-    print(row_fmt.format("True Positives (TP)", strict_m["tp"], lenient_m["tp"]))
-    print(row_fmt.format("False Positives (FP)", strict_m["fp"], lenient_m["fp"]))
-    print(row_fmt.format("True Negatives (TN)", strict_m["tn"], lenient_m["tn"]))
-    print(row_fmt.format("False Negatives (FN)", strict_m["fn"], lenient_m["fn"]))
-    print("-" * 70)
-    
-    print(row_fmt.format("Precision", f"{strict_m['precision']:.4%}", f"{lenient_m['precision']:.4%}"))
-    print(row_fmt.format("Recall (Sensitivity)", f"{strict_m['recall']:.4%}", f"{lenient_m['recall']:.4%}"))
-    print(row_fmt.format("F1-Score", f"{strict_m['f1']:.4%}", f"{lenient_m['f1']:.4%}"))
-    print(row_fmt.format("False Positive Rate (FPR)", f"{strict_m['fpr']:.4%}", f"{lenient_m['fpr']:.4%}"))
-    print("=" * 70)
-    
-    print(" LATENCY PROFILES: TIME-TO-DETECTION (TTD)")
-    print("-" * 70)
-    ttd_fmt = " Window #{:<2} [Frames {:>4}-{:<4}] | Strict TTD: {:<14} | Lenient TTD: {:<14}"
-    
-    for s_t, l_t in zip(strict_ttd, lenient_ttd):
-        s_val = f"{s_t['ttd']} frames" if isinstance(s_t['ttd'], int) else s_t['ttd']
-        l_val = f"{l_t['ttd']} frames" if isinstance(l_t['ttd'], int) else l_t['ttd']
-        print(ttd_fmt.format(s_t['window'], s_t['start'], s_t['end'], s_val, l_val))
-    
-    # Calculate Average Latencies (filtering out undetected windows)
-    s_valid = [x['ttd'] for x in strict_ttd if isinstance(x['ttd'], int)]
-    l_valid = [x['ttd'] for x in lenient_ttd if isinstance(x['ttd'], int)]
-    
-    s_avg = f"{sum(s_valid)/len(s_valid):.2f} frames" if s_valid else "N/A"
-    l_avg = f"{sum(l_valid)/len(l_valid):.2f} frames" if l_valid else "N/A"
-    
-    print("-" * 70)
-    print(f" Average Response Delay    | Strict Avg: {s_avg:<12} | Lenient Avg: {l_avg:<12}")
-    print("=" * 70)
-    
-    # New Metric Short Descriptions Panel
+    print("=" * 80)
     print(" METRIC GLOSSARY & OPERATIONAL INTERPRETATION")
-    print("-" * 70)
+    print("-" * 80)
     print(" • Precision                : Out of all frames flagged as anomalous by the")
     print("                              detector, what % were actually true attacks?")
     print("                              (Higher value = high alert trustworthiness/reliability)")
@@ -191,7 +194,7 @@ def print_evaluation_dashboard(scenario_id, truth_file, detector_file, strict_m,
     print(" • Time-to-Detection (TTD) : The frame-offset delta between the exact start of an")
     print("                              attack phase and the detector's first flagged alert.")
     print("                              (0 frames = instant, immediate edge-trigger response)")
-    print("=" * 70)
+    print("=" * 80)
 
 # =====================================================================
 # MAIN RUNNER EXECUTION
@@ -234,41 +237,91 @@ def main():
               f"but Detector Output contains {len(detector_rows)} rows.")
         sys.exit(1)
 
-    ground_truth_attack = []
-    strict_predictions = []
-    lenient_predictions = []
+    # Identify all base subsystems present across the files
+    truth_keys = list(truth_rows[0].keys())
+    detector_keys = list(detector_rows[0].keys())
 
-    for idx, (t_row, d_row) in enumerate(zip(truth_rows, detector_rows)):
-        if t_row.get("index") != d_row.get("index"):
-            print(f"Error Chronological Mismatch at file offset row {idx}: "
-                  f"Ground Truth index is {t_row.get('index')}, but Detector index is {d_row.get('index')}.")
-            sys.exit(1)
+    # Build unique sets of base layers (e.g., "ENF", "x3115c0s33b0n0")
+    bases = set()
+    for k in truth_keys:
+        if k.endswith("_attack") and k != "attack":
+            bases.add(k[:-7])
+    for k in detector_keys:
+        if k.endswith("_status") and k != "status":
+            bases.add(k[:-7])
 
-        # Extraction and Mapping Strategy
-        truth_val = int(t_row.get("attack", 0))
-        status_val = float(d_row.get("status", 0.0))
+    results_by_layer = {}
 
-        ground_truth_attack.append(truth_val)
-        
-        # Mapping Binary Strict Target Layer
-        strict_predictions.append(1 if status_val == 1.0 else 0)
-        
-        # Mapping Binary Lenient Target Layer
-        lenient_predictions.append(1 if status_val >= 0.5 else 0)
+    # Setup execution layers: Always evaluate Global/System, then individual sub-layers
+    layers_to_eval = [("Global / System", None)]
+    for base in sorted(list(bases)):
+        layers_to_eval.append((base, base))
 
-    # Compute Statistical Metrics Profiles
-    strict_metrics = calculate_confusion_matrix(ground_truth_attack, strict_predictions)
-    lenient_metrics = calculate_confusion_matrix(ground_truth_attack, lenient_predictions)
+    for layer_name, base in layers_to_eval:
+        ground_truth_attack = []
+        strict_predictions = []
+        lenient_predictions = []
 
-    # Compute Latency Metrics Profiles
-    strict_ttd_profile = calculate_time_to_detection(ground_truth_attack, strict_predictions)
-    lenient_ttd_profile = calculate_time_to_detection(ground_truth_attack, lenient_predictions)
+        for idx, (t_row, d_row) in enumerate(zip(truth_rows, detector_rows)):
+            if t_row.get("index") != d_row.get("index"):
+                print(f"Error Chronological Mismatch at file offset row {idx}: "
+                      f"Ground Truth index is {t_row.get('index')}, but Detector index is {d_row.get('index')}.")
+                sys.exit(1)
+
+            # --- RESOLVE TRUTH VALUE ---
+            if base is None:
+                # Global / System: Use "attack", fallback to max of any "_attack" column
+                specific_attacks = [t_row[k] for k in t_row if k.endswith("_attack") and k != "attack"]
+                if "attack" in t_row:
+                    truth_val = int(t_row["attack"])
+                elif specific_attacks:
+                    truth_val = int(max(specific_attacks))
+                else:
+                    truth_val = 0
+            else:
+                # Sub-layer Specific: Use "{base}_attack", fallback to global "attack"
+                truth_val = int(t_row.get(f"{base}_attack", t_row.get("attack", 0)))
+
+            # --- RESOLVE DETECTOR VALUE ---
+            if base is None:
+                # Global / System: Use "status", fallback to max of any "_status" column
+                status_keys = [k for k in d_row if k.endswith("_status") and k != "status"]
+                if "status" in d_row:
+                    status_val = float(d_row["status"])
+                elif status_keys:
+                    status_val = float(max(d_row[k] for k in status_keys))
+                else:
+                    status_val = 0.0
+            else:
+                # Sub-layer Specific: Use "{base}_status", fallback to generic "status"
+                status_val = float(d_row.get(f"{base}_status", d_row.get("status", 0.0)))
+
+            ground_truth_attack.append(truth_val)
+            
+            # Mapping Binary Strict Target Layer (status == 1.0)
+            strict_predictions.append(1 if status_val == 1.0 else 0)
+            
+            # Mapping Binary Lenient Target Layer (status >= 0.5)
+            lenient_predictions.append(1 if status_val >= 0.5 else 0)
+
+        # Compute Statistical Metrics Profiles
+        strict_metrics = calculate_confusion_matrix(ground_truth_attack, strict_predictions)
+        lenient_metrics = calculate_confusion_matrix(ground_truth_attack, lenient_predictions)
+
+        # Compute Latency Metrics Profiles
+        strict_ttd_profile = calculate_time_to_detection(ground_truth_attack, strict_predictions)
+        lenient_ttd_profile = calculate_time_to_detection(ground_truth_attack, lenient_predictions)
+
+        results_by_layer[layer_name] = {
+            "strict_m": strict_metrics,
+            "lenient_m": lenient_metrics,
+            "strict_ttd": strict_ttd_profile,
+            "lenient_ttd": lenient_ttd_profile
+        }
 
     # Render Results Dashboard Panel
     print_evaluation_dashboard(
-        args.id, truth_path, detector_path, 
-        strict_metrics, lenient_metrics, 
-        strict_ttd_profile, lenient_ttd_profile
+        args.id, truth_path, detector_path, results_by_layer
     )
 
 if __name__ == "__main__":
