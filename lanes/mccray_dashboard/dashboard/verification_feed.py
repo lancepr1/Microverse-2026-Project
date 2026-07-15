@@ -3,6 +3,27 @@ verification_feed.py — reads pre-computed VerificationResult records for
 the current replay run and aggregates them into one rack-level status per
 polled sample.
 
+##############################################################################
+# OBSOLETE (2026-07) -- NOT CALLED from data_feed.py anymore. Verification
+# status now comes directly from for_dashboard.jsonl's own "ENF_status"/
+# "<node_id>_status" columns (see models.py's TelemetrySample.status/
+# enf_status, and data_feed.py's own CHANGED/OBSOLETE comment block for the
+# full reasoning). That's the file this module's docstring below still
+# describes as the "current replay run" source -- it no longer is.
+#
+# tools/generate_verification.py -- the offline script that produced the
+# runs/<run_id>/verification.jsonl file this module reads -- is likewise no
+# longer invoked by run_microverse.py's stage 4.
+#
+# Left in the repo untouched (not deleted, logic unchanged below) because
+# it's still technically reachable from data_feed.py's single-node legacy
+# path IF that code were reactivated -- but that path is itself flagged
+# obsolete in data_feed.py's own header comment (confirmed nothing should
+# be reading data/run01.jsonl going forward either). Candidate for full
+# removal alongside that single-node path and tools/generate_verification.py,
+# as one decision -- not made here.
+##############################################################################
+
 This module never imports the shared contracts package or Leiva's
 verification code -- see the dashboard-folder coupling guard test in
 tests/test_ui_imports.py, which checks the dashboard folder's ability to
@@ -70,8 +91,8 @@ def verify_sample(index: int, node_id: str | None = None, run_id: str | None = N
     available for this index.
 
     node_id filters to just that node's results (matched by the node-id
-    prefix embedded in component_id, e.g. "rack_00/node00_gpu-0[W]") plus
-    the shared facility-wide "<run_id>/ENF" check that applies to every
+    prefix embedded in component_id, e.g. "rack_00/x3105c0s37b0n0_gpu-0[W]")
+    plus the shared facility-wide "<run_id>/ENF" check that applies to every
     node -- this is for the multi-node case, where one run_id's
     verification.jsonl covers every node's results together rather than
     one file per node. Leaving node_id unset (the single-node poll()

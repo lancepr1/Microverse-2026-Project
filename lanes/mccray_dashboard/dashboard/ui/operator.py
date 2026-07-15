@@ -131,10 +131,21 @@ def build_operator_tab() -> html.Div:
 
 
 def render_summary_cards(state: dict) -> list:
-    total   = len(list_node_ids())
-    nominal = sum(1 for d in state.values() if d.get("status") == "good")
-    warning = sum(1 for d in state.values() if d.get("status") == "suspect")
-    alert   = sum(1 for d in state.values() if d.get("status") == "warning")
+    """CHANGED (2026-07): now iterates list_node_ids() explicitly instead
+    of blindly summing over state.values() -- data_feed.py's poll_all()
+    added a synthetic "ENF" entry to its output (see that module's own
+    2026-07 comment) so alert_log.py could pick up ENF-only bad events as
+    their own alert episode. That entry is NOT a real node and must never
+    be counted here -- iterating state.values() directly would have let
+    ENF-only badness silently inflate Warning/Alert without inflating
+    Total Nodes, corrupting exactly the counts this card exists to show
+    accurately. list_node_ids() is the same real-node source every other
+    per-node UI element in this file already uses."""
+    node_ids = list_node_ids()
+    total   = len(node_ids)
+    nominal = sum(1 for nid in node_ids if state.get(nid, {}).get("status") == "good")
+    warning = sum(1 for nid in node_ids if state.get(nid, {}).get("status") == "suspect")
+    alert   = sum(1 for nid in node_ids if state.get(nid, {}).get("status") == "warning")
 
     return [
         _summary_card("Total Nodes", str(total)),
@@ -183,7 +194,22 @@ def _build_node_card(node_id):
         className="node-card",
         style={"borderColor": COLOR_DEFAULT},
         children=[
-            html.Div(node_display_label(node_id), className="node-card-id"),
+            # ADDED (2026-07): title= (hover tooltip) + inline overflow
+            # styling -- node ids are now raw hostnames (e.g.
+            # "x3105c0s37b0n0"), which can run noticeably longer than the
+            # old "Node 00" labels this fixed-width card was originally
+            # sized for. Ellipsis-truncates visually without losing the
+            # full id (visible on hover) or breaking the grid layout.
+            html.Div(
+                node_display_label(node_id),
+                className="node-card-id",
+                title=node_id,
+                style={
+                    "overflow": "hidden",
+                    "textOverflow": "ellipsis",
+                    "whiteSpace": "nowrap",
+                },
+            ),
             html.Div("-- W", id={"type": "node-card-power", "node_id": node_id},
                       className="mono-value"),
             html.Div("-- °C", id={"type": "node-card-temp", "node_id": node_id},
@@ -200,17 +226,47 @@ def _worst_status(statuses):
 
 
 def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
+    """CHANGED (2026-07): used to only show this node's aggregate total
+    power + average GPU temp (data_feed.py's _to_state() already sends
+    the full per-component breakdown -- gpu_power_w, gpu_temp_c,
+    cpu_power_w, cpu_core_power_w, all keyed by component index -- this
+    function just never read any of it). Now lists every GPU (power +
+    temp) and every CPU (socket power, plus core-domain power if present)
+    individually, with the node's totals kept above them for a quick
+    at-a-glance summary. Energy counters (cpu_energy_uj/
+    cpu_core_energy_uj) are cumulative counters, not "current output" --
+    deliberately left out of this view; the raw values are still in
+    `state` if a future need for them shows up."""
     if not selected_node:
         return html.Div("Select a node to view details.", className="dimmed-block")
 
     data   = state.get(selected_node, {})
     status = data.get("status", "--")
 
-    power = data.get("total_power_w")
-    temp  = data.get("average_gpu_temp_c")
+    total_power = data.get("total_power_w")
+    avg_temp    = data.get("average_gpu_temp_c")
+    total_power_text = f"{total_power:.1f} W" if total_power is not None else "-- W"
+    avg_temp_text    = f"{avg_temp:.1f} °C" if avg_temp is not None else "-- °C"
 
-    power_text = f"{power:.1f} W" if power is not None else "-- W"
-    temp_text  = f"{temp:.1f} °C" if temp is not None else "-- °C"
+    gpu_power = data.get("gpu_power_w") or {}
+    gpu_temp  = data.get("gpu_temp_c") or {}
+    gpu_rows = []
+    for gpu_id in sorted(set(gpu_power) | set(gpu_temp)):
+        p = gpu_power.get(gpu_id)
+        t = gpu_temp.get(gpu_id)
+        p_text = f"{p:.1f} W" if p is not None else "-- W"
+        t_text = f"{t:.1f} °C" if t is not None else "-- °C"
+        gpu_rows.append(_detail_row(f"GPU {gpu_id}", f"{p_text} / {t_text}"))
+
+    cpu_power = data.get("cpu_power_w") or {}
+    cpu_core_power = data.get("cpu_core_power_w") or {}
+    cpu_rows = []
+    for cpu_id in sorted(set(cpu_power) | set(cpu_core_power)):
+        socket_val = cpu_power.get(cpu_id)
+        core_val = cpu_core_power.get(cpu_id)
+        socket_text = f"{socket_val:.1f} W" if socket_val is not None else "-- W"
+        value_text = f"{socket_text} (core: {core_val:.1f} W)" if core_val is not None else socket_text
+        cpu_rows.append(_detail_row(f"CPU {cpu_id}", value_text))
 
     return html.Div(children=[
         html.Div(node_display_label(selected_node), style={"color": COLOR_TEXT, "fontWeight": "700"}),
@@ -220,10 +276,18 @@ def render_operator_detail(selected_node: str | None, state: dict) -> html.Div:
         _detail_row("Status", _STATUS_TO_LABEL.get(status, "--"),
                     _STATUS_TO_BORDER.get(status, COLOR_LABEL)),
 
-        html.Div("Current Readings", className="section-title"),
+        html.Div("Node Totals", className="section-title"),
         html.Hr(),
-        _detail_row("Power Draw", power_text),
-        _detail_row("GPU Temp", temp_text),
+        _detail_row("Total Power Draw", total_power_text),
+        _detail_row("Average GPU Temp", avg_temp_text),
+
+        html.Div("GPUs", className="section-title"),
+        html.Hr(),
+        *(gpu_rows if gpu_rows else [html.Div("No GPU data.", className="dimmed-block")]),
+
+        html.Div("CPUs", className="section-title"),
+        html.Hr(),
+        *(cpu_rows if cpu_rows else [html.Div("No CPU data.", className="dimmed-block")]),
     ])
 
 
