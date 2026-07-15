@@ -17,7 +17,12 @@ that's a new feature to design, not a restoration of this one.
 """
 from dash import Dash, Output, Input, no_update
 
-from ui.layout import build_layout, render_header_frq_multi, render_header_frq_dot_style
+from ui.layout import (
+    build_layout,
+    render_header_frq_multi,
+    render_header_frq_dot_style,
+    render_header_frq_bubble_style,
+)
 import ui.controls   # noqa: F401 -- registers the controls-store callback
 import ui.blender_feed  # noqa: F401 -- registers the Blender image callback
 import ui.tabs          # noqa: F401 -- registers the tab-switch callbacks
@@ -31,22 +36,32 @@ init_multi_feed()
 app.layout = build_layout()
 
 
-# The header's FRQ text and ENF status dot both read operator-state-store
-# directly -- NOT poll_all() itself, since ui/operator.py's own callback
-# already owns that (poll_all() advances a shared replay cursor and must
-# only be called once per tick). This callback just reads the store's
+# The header's FRQ text, ENF status dot, and the whole frq-readout
+# bubble around them all read operator-state-store directly -- NOT
+# poll_all() itself, since ui/operator.py's own callback already owns
+# that (poll_all() advances a shared replay cursor and must only be
+# called once per tick). This callback just reads the store's
 # already-current value, the same pattern ui/alert_log_tab.py and
 # ui/analyst.py already use.
+#
+# ADDED (2026-07, follow-up): a third Output, "header-frq-bubble".style
+# -- the dot alone wasn't prominent enough; the whole pill/bubble around
+# the FRQ reading now gets the same ENF-driven coloring.
 @app.callback(
     Output("header-frq-hz", "children"),
     Output("header-frq-dot", "style"),
+    Output("header-frq-bubble", "style"),
     Input("operator-state-store", "data"),
 )
 def on_state_change(state):
     if not state:
-        return no_update, no_update
+        return no_update, no_update, no_update
 
-    return render_header_frq_multi(state), render_header_frq_dot_style(state)
+    return (
+        render_header_frq_multi(state),
+        render_header_frq_dot_style(state),
+        render_header_frq_bubble_style(state),
+    )
 
 
 if __name__ == "__main__":
