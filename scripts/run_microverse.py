@@ -88,23 +88,29 @@ STATUS OF EACH STAGE (2026-07):
 USAGE (2026-07 redesign -- fully interactive, no CLI flags to remember):
     python scripts/run_microverse.py
 
-You'll be walked through, in order:
-    1. Path to your raw datasets root folder (e.g. .../00_raw_datasets/)
-    2. Which dataset to ingest -- listed from whatever folders are
-       actually present there (training_*, inference_*)
-    3. How many nodes -- listed from whatever node-count folders exist
+CHANGED (2026-07): all data now lives in a fixed, repo-relative location
+-- data/rawdata/ at the repo root, the same path on every teammate's
+machine regardless of OS or username, not committed to git (space
+constraints). No path typing needed for any of it; you're walked
+through, in order:
+    1. Which dataset to ingest -- listed from whatever folders are
+       actually present under data/rawdata/00_raw_datasets/
+       (training_*, inference_*)
+    2. How many nodes -- listed from whatever node-count folders exist
        under the chosen dataset. This is NOT a fixed list -- different
        datasets genuinely have different options (confirmed:
        training_llama2_70b_lora only has 2/4/8/16node;
        training_stable_diffusion has 1/2/4/8/16node too). Always
        discovered from the real folders present, never hardcoded.
-    4. If (and only if) a training dataset was chosen: which SLURM job
+    3. If (and only if) a training dataset was chosen: which SLURM job
        ID -- discovered by scanning the selected node folder's actual
        filenames for the "..._slurmid_XXXXX_..." pattern, since one
        node folder can contain multiple separate training runs.
        Inference datasets skip this entirely -- they don't use one.
-    5. Path to the ENF CSV file
-    6. Component ID (defaults to rack_00)
+    4. Which ENF recording device and hour -- listed from whatever
+       DevN_ENF_HrNN.csv files are actually present under
+       data/rawdata/ENF-ML (CNN+MAMBA)/Data/
+    5. Component ID (defaults to rack_00)
 
 Then runs the full pipeline. When it reaches attack.py, that script's
 OWN interactive prompts take over the terminal directly -- this
@@ -118,7 +124,6 @@ at all (discover_nlr_pairs(folder, slurm_id=None)).
 """
 
 import argparse
-import os
 import json
 import random
 import re
@@ -193,17 +198,11 @@ def prompt_choice(prompt_text: str, options: list) -> str:
         print("  Invalid choice, try again.")
 
 
-def prompt_path(prompt_text: str, default: str = None) -> Path:
-    """Prompts for a filesystem path, re-asking until it actually exists."""
-    suffix = f" [{default}]" if default else ""
-    while True:
-        raw = input(f"{prompt_text}{suffix}: ").strip()
-        if not raw and default:
-            raw = default
-        path = Path(raw).expanduser()
-        if path.exists():
-            return path
-        print(f"  Path not found: {path} -- try again.")
+# REMOVED (2026-07): prompt_path() used to live here -- a free-text path
+# prompt for the raw datasets/ENF folders. Confirmed unused anywhere in
+# this file once those became fixed, auto-discovered locations under
+# data/rawdata/ (see gather_inputs() below) -- dead code, removed rather
+# than left behind to avoid implying paths are still user-typed anywhere.
 
 
 def _node_sort_key(folder_name: str) -> int:
@@ -264,19 +263,24 @@ def gather_inputs():
     print("Microverse-2026-Project -- Data Ingestion")
     print("=" * 70)
 
-    # Fixed, conventional locations -- not prompted for anymore. See
-    # README.md's "Where to put your data" section for the exact
-    # expected layout. Home directory resolved via os.path.expanduser,
-    # portable across usernames/machines rather than hardcoded to one
-    # person's account.
-    home = os.path.expanduser("~")
-    datasets_root = Path(home) / "Projects" / "00_raw_datasets"
+    # CHANGED (2026-07): was Path(home) / "Projects" / "00_raw_datasets" --
+    # home-directory-relative, meaning every teammate had to create a
+    # "Projects" folder in their own home directory and put data there
+    # by hand. Now repo-relative (data/rawdata/), matching the actual
+    # folder structure everyone's local clone has -- works identically
+    # on Windows/Mac/Linux with zero per-person setup, since _REPO_ROOT
+    # is self-locating (see its own comment above) and pathlib handles
+    # path separators correctly on every OS. Data lives in this folder
+    # locally on every machine but is NOT committed to git (space
+    # constraints) -- see .gitignore.
+    datasets_root = _REPO_ROOT / "data" / "rawdata" / "00_raw_datasets"
     if not datasets_root.exists():
         raise RuntimeError(
             f"Expected your raw NLR datasets at {datasets_root}, but that "
             f"folder doesn't exist. See README.md's \"Where to put your "
-            f"data\" section -- create that folder and put your dataset "
-            f"folders (training_*, inference_*) inside it."
+            f"data\" section -- create data/rawdata/00_raw_datasets/ at "
+            f"the repo root and put your dataset folders (training_*, "
+            f"inference_*) inside it."
         )
     dataset_options = sorted(p.name for p in datasets_root.iterdir() if p.is_dir())
     if not dataset_options:
@@ -322,13 +326,14 @@ def gather_inputs():
     else:
         print("  (no SLURM ID needed -- inference datasets don't use one)")
 
-    enf_folder = Path(home) / "Projects" / "ENF-ML (CNN+MAMBA)" / "Data"
+    # CHANGED (2026-07): same repo-relative move as datasets_root above.
+    enf_folder = _REPO_ROOT / "data" / "rawdata" / "ENF-ML (CNN+MAMBA)" / "Data"
     if not enf_folder.exists():
         raise RuntimeError(
             f"Expected your ENF data at {enf_folder}, but that folder "
             f"doesn't exist. See README.md's \"Where to put your data\" "
-            f"section -- create that folder and put your DevN_ENF_HrNN.csv "
-            f"files inside it."
+            f"section -- create data/rawdata/ENF-ML (CNN+MAMBA)/Data/ at "
+            f"the repo root and put your DevN_ENF_HrNN.csv files inside it."
         )
     devices = discover_enf_devices(enf_folder)
     if not devices:
@@ -765,10 +770,17 @@ def stage_5_launch_digital_twin() -> None:
     the entire point of watching the twin update live. Runs with a
     normal, visible Blender window instead.
 
-    main_run.py has its own interactive prompt for the .blend file path
-    (remembers the last-used path across runs) -- inherits this
-    process's stdin/stdout so that prompt works correctly, same pattern
-    already used for attack.py's own interactive prompts in stage_2.
+    CHANGED (2026-07): main_run.py's .blend file handling is NOT an
+    interactive prompt that remembers the last path (that description
+    was stale relative to main_run.py's actual code) -- it auto-scans
+    data/rawdata/ (repo-relative, same convention as gather_inputs()'s
+    dataset/ENF discovery above) for a .blend file, auto-selecting if
+    exactly one is found. Only asks a real question (which one?) if
+    multiple .blend files are actually present there; fails with a
+    clear, actionable message if none are. MICROVERSE_BLEND_FILE, if
+    set, skips the scan entirely -- useful for non-interactive/automated
+    runs. Still inherits this process's stdin/stdout, same as attack.py's
+    prompts in stage_2, for the rare multi-file disambiguation case.
 
     Still a BLOCKING call (subprocess.run, not Popen) -- this is
     deliberately the last thing main() does, so the pipeline "finishes"
@@ -776,7 +788,6 @@ def stage_5_launch_digital_twin() -> None:
     behaved before the dashboard was added.
     """
     vprint(f"[5/5] Launching Blender with the digital twin ...")
-    vprint(f"[5/5] main_run.py has its own prompt for the .blend file path -- answer that directly below.\n")
     subprocess.run(
         ["blender", "--python", "main_run.py"],
         check=True,
