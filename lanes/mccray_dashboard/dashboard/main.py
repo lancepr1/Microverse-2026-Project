@@ -1,40 +1,52 @@
 """
 main.py — Dash entry point.
 
-Builds the layout, starts the telemetry replay, and wires the single
-polling callback that drives the header FRQ text once per tick. ui.controls,
-ui.blender_feed, ui.tabs, ui.operator, ui.analyst, and ui.alert_log_tab
-register their own smaller callbacks as a side effect of being imported.
+Builds the layout, starts the telemetry replay, and wires the header's
+polling callback (FRQ text + ENF status dot). ui.controls, ui.blender_feed,
+ui.tabs, ui.operator, ui.analyst, and ui.alert_log_tab register their own
+smaller callbacks as a side effect of being imported.
+
+REMOVED (2026-07, cleanup pass): the single-node data_feed.py feed
+(init_feed()/poll()/get_rack_id()) and its SQLite history logging
+(history_store.py/record_sample()) are both gone. Confirmed with Leiva
+that nothing should read data/run01.jsonl going forward, and that was the
+only thing feeding this logging -- removing the dead code means the
+SQLite logging feature is gone too, not just the demo file it was reading.
+If persistent logging of the REAL multi-node stream is wanted later,
+that's a new feature to design, not a restoration of this one.
 """
 from dash import Dash, Output, Input, no_update
 
-from ui.layout import build_layout, render_header_frq
+from ui.layout import build_layout, render_header_frq_multi, render_header_frq_dot_style
 import ui.controls   # noqa: F401 -- registers the controls-store callback
 import ui.blender_feed  # noqa: F401 -- registers the Blender image callback
 import ui.tabs          # noqa: F401 -- registers the tab-switch callbacks
 import ui.operator      # noqa: F401 -- registers the Operator tab callbacks
 import ui.analyst       # noqa: F401 -- registers the Analyst tab rack chart callback
 import ui.alert_log_tab # noqa: F401 -- registers the Alert log tab callback
-from data_feed import init_feed, init_multi_feed, poll, get_rack_id
-from history_store import init_history_db, record_sample
+from data_feed import init_multi_feed
 
 app = Dash(__name__, title="Data Center Dashboard")
-init_feed()
 init_multi_feed()
-init_history_db()
 app.layout = build_layout()
 
 
+# The header's FRQ text and ENF status dot both read operator-state-store
+# directly -- NOT poll_all() itself, since ui/operator.py's own callback
+# already owns that (poll_all() advances a shared replay cursor and must
+# only be called once per tick). This callback just reads the store's
+# already-current value, the same pattern ui/alert_log_tab.py and
+# ui/analyst.py already use.
 @app.callback(
     Output("header-frq-hz", "children"),
-    Input("poll-interval", "n_intervals"),
+    Output("header-frq-dot", "style"),
+    Input("operator-state-store", "data"),
 )
-def on_tick(_n):
-    state = poll()
-    if state:
-        record_sample(get_rack_id(), state[get_rack_id()])
+def on_state_change(state):
+    if not state:
+        return no_update, no_update
 
-    return render_header_frq(state) if state else no_update
+    return render_header_frq_multi(state), render_header_frq_dot_style(state)
 
 
 if __name__ == "__main__":

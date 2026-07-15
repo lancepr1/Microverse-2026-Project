@@ -1,9 +1,27 @@
 """
 tools/generate_verification.py — offline step that runs Leiva's
 AnchorExtractor + Verifier over a recorded telemetry file and writes the
-results to runs/<run_id>/verification.jsonl via microverse_core.io_records,
-the file-bus format contracts.py defines for VerificationResult:
-    runs/<run_id>/verification.jsonl   VerificationResult   (Leiva)
+results to runs/<run_id>/verification.jsonl via microverse_core.io_records.
+
+##############################################################################
+# OBSOLETE (2026-07): no longer invoked by run_microverse.py's stage 4.
+# Verification status now comes directly from for_dashboard.jsonl's own
+# "ENF_status"/"<node_id>_status" columns (written by stage 3, which
+# already runs the Verifier once) -- see models.py/data_feed.py's own
+# 2026-07 comments in the dashboard package for the full reasoning. This
+# script used to exist specifically to give the dashboard a second,
+# independent Verifier pass to read from; that's no longer needed, and
+# running it also had a real bug (io_records.write_records() opens its
+# output file in APPEND mode, not overwrite, so repeated pipeline runs
+# silently accumulated stale results in the same runs/<run_id>/
+# verification.jsonl file, mixing scenarios together).
+#
+# Left in the repo untouched -- still runnable standalone for offline
+# debugging/inspection if genuinely needed -- but not part of the live
+# pipeline. Candidate for removal alongside verification_feed.py and
+# tools/normalize_node_ids.py's normalize_verification_component_ids(), as
+# one decision, not made here.
+##############################################################################
 
 This script is intentionally NOT part of the dashboard package -- the
 dashboard/ folder must stay importable with no sibling-lane code present
