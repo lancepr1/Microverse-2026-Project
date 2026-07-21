@@ -77,12 +77,29 @@ information along -- not to gate whether data keeps moving.
                                 genuinely different stable levels, so
                                 "must return to the original reference" is
                                 the wrong test there.
+   16. NLRStartupRampCheck      GPU wattage only. A different gap from
+                                #15: checks whether a channel EVER reaches
+                                a plausible operating level after startup
+                                at all, not whether it deviated from one.
+                                A channel stuck at idle-level wattage the
+                                entire run currently passes every other
+                                NLR check cleanly (individually "in
+                                range", just low). Never flags before
+                                GPU_STARTUP_DEADLINE_WINDOWS -- the real
+                                transition is non-monotonic, bouncing
+                                between idle and steady-state repeatedly
+                                before locking in -- only judges whether a
+                                SUSTAINED run in range was ever achieved
+                                by the deadline. Sticky/recovers the same
+                                way #15 does. See its own docstring and
+                                the GPU_STARTUP_* constants for full
+                                calibration history.
     Every channel present in the record gets its own result, every call --
     a bad gpu-0[W] reading does not stop cpu-1[uJ] from being checked, and
     if multiple checks flag the same channel in the same window, they
     merge into one result naming all of them.
 
-   16. Cross-node corroboration (_apply_synchronized_event_correlation)
+   17. Cross-node corroboration (_apply_synchronized_event_correlation)
                                Runs after all NLR checks merge. A pure
                                step-size (discontinuity) failure is
                                downgraded from FAILED to SUSPECT when
@@ -347,6 +364,129 @@ NLR_STARTUP_RAMP_WINDOWS = 150
 # project for CPU/GPU startup-ramp behavior. _NLRContinuityCheck still
 # catches genuine discontinuities during the ramp exactly as before --
 # only this check's sticky/sustained behavior is gated.
+
+# ---------------------------------------------------------------------------
+# Startup-ramp detection -- added 2026-07, per direct request. Closes a
+# real, separate gap from everything above: nothing in this file checks
+# whether a channel EVER reaches a plausible operating level after job
+# startup AT ALL. A channel stuck at idle-level wattage for an entire
+# run -- attack or genuine fault -- currently passes every other NLR
+# check cleanly, since idle-level values are individually "in range"
+# (just low) and never step hard enough to trip continuity or
+# sustained-deviation.
+#
+# Calibrated (2026-07) against 4 real clean node-runs (16 GPUs total --
+# nvml_wattameter emission logs, SLURM jobs 10742795/10742796, LLaMA-2-
+# 70B LoRA training), resampled to the exact 2-second/index cadence this
+# file actually operates on. Two real findings drove the design:
+#
+# 1. The wattage transition is genuinely NON-monotonic, not a clean
+#    ramp. Real values bounce between idle (~120W) and full
+#    steady-state (~550-690W) repeatedly for several samples before
+#    finally locking in -- e.g. one real GPU's actual sequence: 124W ->
+#    408W -> 530W -> 284W -> 444W -> 558W -> 368W -> 124W -> 436W ->
+#    649W, all within a 14-index span. A check that judges the value AT
+#    a single fixed index would false-positive on real clean data (3 of
+#    4 real nodes tested were below 400W at index 140 specifically,
+#    despite ramping normally). This design instead only judges whether
+#    a SUSTAINED run inside the target range was EVER achieved by the
+#    deadline -- never a single-sample snapshot -- so the noisy
+#    transition itself is never flagged, only a channel that genuinely
+#    never settles.
+# 2. Real sustained-stabilization index (GPU_SUSTAIN_SAMPLES
+#    consecutive samples inside [GPU_STARTUP_MIN_W, GPU_STARTUP_MAX_W]),
+#    across all 16 GPUs tested: 141-145, a tight 4-index spread.
+#    GPU_STARTUP_DEADLINE_WINDOWS below sits well past that observed
+#    max -- see its own comment for the margin reasoning.
+#
+# HONEST CAVEAT: only 4 independent runs, all the same job type (LLaMA-
+# 2-70B LoRA), went into this calibration -- a much smaller sample than
+# most other thresholds in this file (compare GPU_MAX_STEP_W's 14,392
+# real observations). Revisit if a different workload type shows
+# meaningfully different ramp timing.
+#
+# GPU TEMPERATURE deliberately NOT included yet -- the same real logs
+# show idle GPU temp (~40-41C) rising to steady-state (~61-69C) during
+# the same transition, so a real signal exists, but no explicit target
+# range was given for temp the way it was for wattage. Guessing one
+# from a ~20-28C spread risks the exact over-fit mistake this file
+# already warns against elsewhere -- add GPU_STARTUP_TEMP_MIN_C/MAX_C
+# once a real target is specified, rather than inventing one here.
+GPU_STARTUP_MIN_W = 400.0
+GPU_STARTUP_MAX_W = 700.0
+GPU_STARTUP_DEADLINE_WINDOWS = 200
+# Real observed max sustained-stabilization index across all 16 GPUs
+# tested: 145 (range 141-145). 200 gives ~38% margin above that --
+# deliberately more generous than the ~10% margin used elsewhere in
+# this file for thresholds like GPU_MAX_STEP_W, because this is
+# calibrated from only 4 runs, not thousands of observations --
+# small-sample uncertainty argues for more headroom, not less.
+GPU_SUSTAIN_SAMPLES = 5
+# 5 consecutive samples (10 seconds at the 2-second/index cadence)
+# required before counting a channel as genuinely stabilized -- not
+# just "touched the range once during the noisy transition." The real
+# test data momentarily entered [400,700]W on single, isolated samples
+# well before genuinely locking in, which is exactly the
+# false-positive-on-noise case this guards against.
+#
+# SHARED (2026-07) with _NLRSustainedDeviationCheck's own recovery
+# mechanism, and now also with _NLRReplayCheck's recovery below -- same
+# underlying question in all three places ("how many consecutive good
+# samples before genuinely trusting this is stable, not a blip"), so
+# one calibrated answer instead of several almost-identical constants.
+
+# ---------------------------------------------------------------------------
+# Replay detection -- added 2026-07, per direct request. Detects a short
+# subsequence of consecutive raw values recurring later in the same
+# channel's own history -- the signature left by attack.py's actual
+# Replay engine, which cycles through a fixed ~90-sample source window
+# for the whole attack duration. A legitimate sensor essentially never
+# reproduces the same short run of readings twice by chance -- real
+# telemetry has continuous natural variation -- so an exact repeat of
+# REPLAY_MATCH_LENGTH consecutive values is specific, strong evidence of
+# tampering.
+#
+# HONEST CALIBRATION NOTE, same spirit as the ENF alternative-correlation
+# check's own "starting point, not final answer" caveat: these two
+# values are set by REASONING from attack.py's documented 90-sample
+# cycle length, not yet validated against a real, confirmed Replay-
+# engine attack file the way most thresholds in this file are (the real
+# attack data available so far, attack_easy_2, does not clearly use the
+# Replay engine specifically -- see _NLRReplayCheck's own docstring).
+# Test against a real Replay-engine file before treating these as final.
+REPLAY_MATCH_LENGTH = 4
+# Per direct request: 3-5 consecutive values. 4 sits in the middle of
+# that range -- long enough that a coincidental match on continuously-
+# varying real data is essentially impossible, short enough to still
+# detect a replay quickly once one full cycle has elapsed.
+REPLAY_LOOKBACK_WINDOW = 100
+# Bounded, not unbounded -- deliberate, not just a memory optimization.
+# Matches attack.py's real ~90-sample replay cycle length plus margin,
+# so detection stays tied to the real attack mechanism's own timing
+# instead of quietly becoming "flag anything that ever repeated
+# anywhere in this ~1800-window file," a much noisier, less specific
+# test. Consequence, accepted per direct instruction: the FIRST full
+# cycle through a replayed window is invisible (nothing earlier to
+# compare against yet) -- every subsequent cycle is caught. A real
+# attack sustains for many cycles, so missing the first ~90 samples of
+# a much longer attack is a minor cost for a check this specific.
+
+REPLAY_MIN_MAGNITUDE_W = 5.0
+# FOUND (2026-07) testing against a real attacked file, not
+# hypothetical: CPU CORE-domain wattage ("<node>_cpu-N-core[W]") sits
+# so close to zero in real data (observed range 0.02-4.4W) that at 4
+# decimal places of precision there are too few practically-
+# distinguishable values -- coincidental exact 4-tuple repeats happen
+# by chance alone, with zero connection to any actual attack (267 false
+# positives found this way on real clean post-attack data, ALL on
+# core-domain channels, before this guard existed). Socket-level CPU
+# wattage (99.8-146.1W) and GPU wattage (73.9-689.3W) in the same real
+# file never come remotely close to this floor, so 5.0W cleanly
+# separates the one genuinely low-entropy channel type from everything
+# else without losing real coverage. Applies to gpu_power and cpu_power
+# both (not just core-domain specifically) for simplicity -- GPU
+# wattage never drops anywhere near this floor in practice, so it costs
+# nothing there.
 
 # Derived (not arbitrary): CPU_POWER_CEILING_W for one ENF window,
 # converted to uJ, with a 1.5x safety margin.
@@ -1085,10 +1225,38 @@ class _NLRSustainedDeviationCheck:
 
     Once a step exceeds GPU_MAX_STEP_W/GPU_TEMP_MAX_STEP_C, the channel
     is marked FAILED and STAYS failed on every subsequent window --
-    not just the entry transition -- until it genuinely returns within
-    GPU_POWER_RECOVERY_BAND_W/GPU_TEMP_RECOVERY_BAND_C of the value it
-    had right before the violation. See the constants above for
-    calibration details.
+    not just the entry transition -- until EITHER of two independent
+    recovery conditions is met:
+
+    1. ORIGINAL path: value returns within GPU_POWER_RECOVERY_BAND_W/
+       GPU_TEMP_RECOVERY_BAND_C of the value it had right before the
+       violation. Correct for this check's originally-intended case: a
+       transient spike/dip that should settle back near where it was.
+
+    2. FIXED (2026-07), a real bug found against real attack data, not
+       a hypothetical: path 1 alone is UNSATISFIABLE when the "jump"
+       that triggers the stuck state is itself the RECOVERY from a
+       sustained attack that held a fabricated LOW value -- the
+       reference this check locks onto is that fabricated value, not
+       the true baseline, so real post-attack data (genuinely
+       different, genuinely higher) can never get close to it.
+       Confirmed directly: a real attack held gpu-0[W] at ~127W for
+       over 1000 windows, then released to genuine ~500-690W steady
+       state -- status stayed FAILED for 720+ windows of real, clean,
+       recovered data because it could never return within
+       +/-150W of the 127W reference. Second path: K consecutive
+       STEP-TO-STEP changes (not absolute closeness to any reference)
+       that are each individually under the same GPU_MAX_STEP_W/
+       GPU_TEMP_MAX_STEP_C threshold used to detect entry -- i.e. "has
+       this channel found a new stable rhythm," regardless of whether
+       that rhythm resembles the old one. Requires no new invented
+       threshold -- reuses the same step-size limits already validated
+       against real data elsewhere in this file. K =
+       GPU_SUSTAIN_SAMPLES, shared with _NLRStartupRampCheck's own
+       "how many consecutive good samples before genuinely trusting
+       it's stable" question -- same underlying question, same answer.
+       Verified against the real attack above: recovers within 5
+       windows of the attack ending (window 1085, vs. never before).
 
     Does not apply to CPU wattage or CPU energy -- CPU wattage's much
     higher natural volatility (see _CPUPowerEnergyConsistencyCheck's
@@ -1102,6 +1270,7 @@ class _NLRSustainedDeviationCheck:
         self._prev: dict[str, float] = {}
         self._reference: dict[str, float] = {}  # value right before the violation
         self._stuck: dict[str, bool] = {}
+        self._recovery_step_run: dict[str, int] = {}  # ADDED -- consecutive normal-sized steps while stuck
         self._window_count = 0
 
     def check(self, record: dict) -> dict[str, tuple[str, str]]:
@@ -1141,8 +1310,26 @@ class _NLRSustainedDeviationCheck:
 
                 if self._stuck.get(key):
                     ref = self._reference[key]
-                    if abs(val - ref) <= recovery_band:
+                    step = abs(val - prev)
+
+                    # ADDED (2026-07): second recovery path -- see class
+                    # docstring's FIXED note. Tracks consecutive
+                    # normal-sized steps WHILE stuck, independent of
+                    # numeric closeness to the (possibly fabricated)
+                    # reference.
+                    if step <= step_threshold:
+                        self._recovery_step_run[key] = self._recovery_step_run.get(key, 0) + 1
+                    else:
+                        self._recovery_step_run[key] = 0
+
+                    recovered_to_reference = abs(val - ref) <= recovery_band
+                    recovered_to_new_plateau = (
+                        self._recovery_step_run.get(key, 0) >= GPU_SUSTAIN_SAMPLES
+                    )
+
+                    if recovered_to_reference or recovered_to_new_plateau:
                         self._stuck[key] = False
+                        self._recovery_step_run[key] = 0
                         results[key] = (_TRUSTED, "ok")
                     else:
                         results[key] = (_FAILED, (
@@ -1150,18 +1337,25 @@ class _NLRSustainedDeviationCheck:
                             f"not recovered -- still {abs(val - ref):.2f}{unit} "
                             f"away from the {ref:.2f}{unit} it held before the "
                             f"original jump (recovery band: "
-                            f"+/-{recovery_band}{unit})"
+                            f"+/-{recovery_band}{unit}), and has not yet held "
+                            f"{GPU_SUSTAIN_SAMPLES} consecutive stable steps at "
+                            f"a new level either "
+                            f"({self._recovery_step_run.get(key, 0)}/"
+                            f"{GPU_SUSTAIN_SAMPLES} so far)"
                         ))
                 else:
                     step = abs(val - prev)
                     if step > step_threshold:
                         self._stuck[key] = True
                         self._reference[key] = prev
+                        self._recovery_step_run[key] = 0
                         results[key] = (_FAILED, (
                             f"SUSTAINED DEVIATION: {key} jumped "
                             f"{step:.2f}{unit} to {val:.2f}{unit} -- will stay "
                             f"FAILED until it returns within "
-                            f"+/-{recovery_band}{unit} of {prev:.2f}{unit}"
+                            f"+/-{recovery_band}{unit} of {prev:.2f}{unit}, or "
+                            f"holds {GPU_SUSTAIN_SAMPLES} consecutive stable "
+                            f"steps at a new level"
                         ))
 
                 self._prev[key] = val
@@ -1172,7 +1366,244 @@ class _NLRSustainedDeviationCheck:
         self._prev.clear()
         self._reference.clear()
         self._stuck.clear()
+        self._recovery_step_run.clear()
         self._window_count = 0
+
+    def reset(self) -> None:
+        self._prev.clear()
+        self._reference.clear()
+        self._stuck.clear()
+        self._window_count = 0
+
+
+class _NLRStartupRampCheck:
+    """
+    GPU wattage only -- see GPU_STARTUP_* constants above (this class's
+    own calibration notes) for why temperature isn't included yet.
+
+    Closes a real gap _NLRSustainedDeviationCheck and every other NLR
+    check leave open: nothing checks whether a channel EVER reaches a
+    plausible operating level after startup AT ALL. A channel stuck at
+    idle-level wattage for an entire run -- attack or genuine fault --
+    passes every other NLR check cleanly, since idle-level values are
+    individually "in range" (just low) and never step hard enough to
+    trip continuity or sustained-deviation.
+
+    Deliberately does NOT judge anything before
+    GPU_STARTUP_DEADLINE_WINDOWS -- the real transition is genuinely
+    non-monotonic (see this file's GPU_STARTUP_* calibration notes), so
+    nothing before the deadline is ever flagged, only tracked. Once a
+    channel achieves GPU_SUSTAIN_SAMPLES consecutive samples
+    inside [GPU_STARTUP_MIN_W, GPU_STARTUP_MAX_W], it is marked
+    stabilized PERMANENTLY -- this check's job for that channel is done
+    from then on; ongoing plausibility is every other NLR check's job.
+
+    Past the deadline, a channel that has never yet achieved that
+    sustained run is FAILED, and stays FAILED -- sticky, same pattern as
+    _NLRSustainedDeviationCheck -- until it genuinely does achieve one.
+    A slow-to-start job legitimately recovers rather than staying
+    flagged forever once it's clearly fine.
+
+    Participates in the same worst-of merge as every other NLR check
+    (see _merge_key_results/Verifier.verify()) -- a channel this check
+    calls TRUSTED (still within its grace period) can still end up
+    FAILED overall if any OTHER check on that same channel/window finds
+    a real problem, and vice versa. No special-casing needed for that:
+    it falls straight out of the existing merge architecture.
+    """
+
+    def __init__(self):
+        self._window_count = 0
+        self._stabilized: dict[str, bool] = {}
+        self._sustain_run: dict[str, int] = {}
+
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
+        self._window_count += 1
+        channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
+
+        for key in channels["gpu_power"]:
+            val = record.get(key)
+            if val is None:
+                continue
+
+            if self._stabilized.get(key):
+                results[key] = (_TRUSTED, "ok")
+                continue
+
+            in_range = GPU_STARTUP_MIN_W <= val <= GPU_STARTUP_MAX_W
+            self._sustain_run[key] = (self._sustain_run.get(key, 0) + 1) if in_range else 0
+
+            if self._sustain_run[key] >= GPU_SUSTAIN_SAMPLES:
+                self._stabilized[key] = True
+                results[key] = (_TRUSTED, "ok")
+            elif self._window_count <= GPU_STARTUP_DEADLINE_WINDOWS:
+                # Still within the grace period -- track the sustain run,
+                # but never flag. The real transition bounces in and out
+                # of range repeatedly before locking in; judging a single
+                # sample here would false-positive on that noise.
+                results[key] = (_TRUSTED, "ok")
+            else:
+                results[key] = (_FAILED, (
+                    f"STARTUP RAMP: {key}={val:.2f}W has never sustained "
+                    f"{GPU_SUSTAIN_SAMPLES} consecutive samples "
+                    f"inside the expected operating range "
+                    f"[{GPU_STARTUP_MIN_W:.0f},{GPU_STARTUP_MAX_W:.0f}]W by "
+                    f"window {self._window_count} (deadline "
+                    f"{GPU_STARTUP_DEADLINE_WINDOWS}) -- will clear once it "
+                    f"does"
+                ))
+
+        return results
+
+    def reset(self) -> None:
+        self._window_count = 0
+        self._stabilized.clear()
+        self._sustain_run.clear()
+
+
+class _NLRReplayCheck:
+    """
+    Detects a short subsequence of consecutive raw values recurring
+    later in the same channel's own history -- the signature left by
+    attack.py's actual Replay engine, which cycles through a fixed
+    ~90-sample source window for the whole attack duration (see
+    REPLAY_MATCH_LENGTH/REPLAY_LOOKBACK_WINDOW above for the full
+    calibration reasoning, including the honest caveat that this is
+    reasoned from attack.py's documented mechanism, not yet validated
+    against a confirmed real Replay-engine attack file).
+
+    Applies to every NLR channel (GPU wattage/temp, CPU wattage/energy)
+    -- attack.py's target groups let a replay attack hit any of these,
+    not just GPU wattage, so this isn't scoped narrower than the real
+    attack surface.
+
+    Excludes near-zero wattage readings entirely (gpu_power/cpu_power
+    below REPLAY_MIN_MAGNITUDE_W) -- another real bug found testing
+    against real attacked data: CPU core-domain wattage sits close
+    enough to zero that limited precision made coincidental repeats
+    common, unrelated to any actual attack. See that constant's own
+    comment for the full finding.
+
+    Excludes degenerate FLAT matches (all REPLAY_MATCH_LENGTH values in
+    the tail identical) -- found by this project's own regression suite
+    during development: synthetic all-constant test fixtures triggered
+    this check on every channel, since a frozen value trivially "matches
+    itself" against every other window of the same flat value. A real
+    replay attack copies a VARYING historical window, not a frozen
+    constant, so requiring at least 2 distinct values in the matched
+    tail excludes the degenerate case without weakening the real signal.
+
+    RECOVERY (2026-07): sticky like _NLRSustainedDeviationCheck and
+    _NLRStartupRampCheck, but with a recovery condition suited to this
+    specific failure mode -- there's no single "reference value" a
+    replay recovers TO the way a wattage spike does, so numeric
+    closeness doesn't apply here. Instead: clears once GPU_SUSTAIN_SAMPLES
+    consecutive windows pass with NO new repeated subsequence found --
+    "has this channel stopped repeating itself." Built this way from the
+    start specifically to avoid the unsatisfiable-recovery bug found and
+    fixed in _NLRSustainedDeviationCheck (see that class's own docstring)
+    -- there is no way for this recovery condition to lock onto a
+    fabricated reference, since it never references one at all.
+
+    PERFORMANCE NOTE: an O(REPLAY_LOOKBACK_WINDOW x REPLAY_MATCH_LENGTH)
+    scan per channel per window -- for a full 16-node run this is real
+    but not tested against a wall-clock budget yet; revisit if it
+    becomes a bottleneck on a full run (a hash-based subsequence index
+    would remove most of this cost if needed).
+    """
+
+    def __init__(self):
+        self._history: dict[str, collections.deque] = {}
+        self._stuck: dict[str, bool] = {}
+        self._clean_run: dict[str, int] = {}
+
+    def _buffer(self, key: str) -> collections.deque:
+        if key not in self._history:
+            self._history[key] = collections.deque(maxlen=REPLAY_LOOKBACK_WINDOW)
+        return self._history[key]
+
+    def check(self, record: dict) -> dict[str, tuple[str, str]]:
+        channels = _find_nlr_keys(record)
+        results: dict[str, tuple[str, str]] = {}
+
+        all_keys = (
+            channels["gpu_power"] + channels["gpu_temp"]
+            + channels["cpu_power"] + channels["cpu_uj"]
+        )
+        low_magnitude_wattage_keys = set(channels["gpu_power"] + channels["cpu_power"])
+
+        for key in all_keys:
+            val = record.get(key)
+            if val is None:
+                continue
+
+            # FOUND (2026-07) against real data -- see
+            # REPLAY_MIN_MAGNITUDE_W's own comment. Skip entirely (not
+            # even buffered) rather than buffer-but-don't-flag, so a
+            # channel that later crosses back above the floor doesn't
+            # have a history full of unreliable near-zero noise to
+            # compare against.
+            if key in low_magnitude_wattage_keys and abs(val) < REPLAY_MIN_MAGNITUDE_W:
+                continue
+
+            buf = self._buffer(key)
+            buf.append(round(val, 4))
+
+            matched = False
+            tail = None
+            if len(buf) >= 2 * REPLAY_MATCH_LENGTH:
+                snapshot = list(buf)
+                tail = snapshot[-REPLAY_MATCH_LENGTH:]
+                # FIXED (2026-07, found by the regression suite): a
+                # perfectly flat/frozen reading trivially "matches
+                # itself" against every other window of the same flat
+                # value -- degenerate, not what this check is meant to
+                # catch. A real replay attack copies a VARYING
+                # historical window (see REPLAY_MATCH_LENGTH's own
+                # comment); requiring at least 2 distinct values in the
+                # tail excludes the degenerate flat case while leaving
+                # the real signal (an exact repeat of genuinely varying
+                # readings) untouched.
+                if len(set(tail)) > 1:
+                    history = snapshot[:-REPLAY_MATCH_LENGTH]
+                    for start in range(len(history) - REPLAY_MATCH_LENGTH + 1):
+                        if history[start:start + REPLAY_MATCH_LENGTH] == tail:
+                            matched = True
+                            break
+
+            if matched:
+                self._stuck[key] = True
+                self._clean_run[key] = 0
+                results[key] = (_FAILED, (
+                    f"REPLAY: {key} -- the last {REPLAY_MATCH_LENGTH} "
+                    f"readings ({tail}) exactly match an earlier run "
+                    f"within the last {REPLAY_LOOKBACK_WINDOW} samples -- "
+                    f"real sensor data does not repeat itself like this"
+                ))
+            elif self._stuck.get(key):
+                self._clean_run[key] = self._clean_run.get(key, 0) + 1
+                if self._clean_run[key] >= GPU_SUSTAIN_SAMPLES:
+                    self._stuck[key] = False
+                    results[key] = (_TRUSTED, "ok")
+                else:
+                    results[key] = (_FAILED, (
+                        f"REPLAY: {key} -- no new repeat found this "
+                        f"window, but has not yet held "
+                        f"{GPU_SUSTAIN_SAMPLES} consecutive clean windows "
+                        f"to clear ({self._clean_run[key]}/"
+                        f"{GPU_SUSTAIN_SAMPLES})"
+                    ))
+            # else: not stuck, no match -- stay silent, same "opt out
+            # when calm" convention _NLRSustainedDeviationCheck already
+            # uses (other checks report TRUSTED for a calm channel).
+
+        return results
+
+    def reset(self) -> None:
+        self._history.clear()
+        self._stuck.clear()
+        self._clean_run.clear()
 
 
 class _NLRMonotonicityCheck:
@@ -1583,6 +2014,8 @@ class Verifier:
         self._nlr_monotonicity_check = _NLRMonotonicityCheck()
         self._cross_sibling_check = _CrossSiblingConsistencyCheck()
         self._sustained_deviation_check = _NLRSustainedDeviationCheck()
+        self._startup_ramp_check        = _NLRStartupRampCheck()
+        self._replay_check              = _NLRReplayCheck()
         self._gpu_temp_range_check      = _GPUTempRangeCheck()
         self._gpu_temp_continuity_check = _GPUTempContinuityCheck()
 
@@ -1765,6 +2198,8 @@ class Verifier:
                 self._nlr_monotonicity_check.check(record_dict),
                 self._cross_sibling_check.check(record_dict),
                 self._sustained_deviation_check.check(record_dict),
+                self._startup_ramp_check.check(record_dict),
+                self._replay_check.check(record_dict),
                 self._gpu_temp_range_check.check(record_dict),
                 self._gpu_temp_continuity_check.check(record_dict),
             )

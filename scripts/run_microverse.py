@@ -25,58 +25,57 @@ STATUS OF EACH STAGE (2026-07):
                                    plain file (no ground truth) is ever
                                    fed to verification -- see
                                    stage_2_inject_attacks()'s docstring
-                                   for why that boundary matters.
+                                   for why that boundary matters. Now
+                                   also returns check_path (previously
+                                   discarded after internal use), since
+                                   stage 4 below needs it.
     Stage 3 (verify + fork):      REAL, tested, working. Verifies and
                                    writes directly to all three
                                    destinations in one pass -- no
                                    intermediate "anchor_verified.jsonl"
                                    file, since all three destinations
                                    were always identical copies of it
-                                   anyway. for_digital_twin.jsonl is now
+                                   anyway. for_digital_twin.jsonl is
                                    genuinely consumed by Baron's
                                    main_run.py (stage 6 below).
-                                   for_dashboard.jsonl's SHAPE is real
-                                   and consumed by McCray's dashboard
-                                   (data_feed.py reads it directly) --
-                                   but its node-id columns are still
-                                   whatever raw hostname discover_nlr_pairs()
-                                   found, not the node00..nodeNN format
-                                   the dashboard expects. Stage 4 fixes
-                                   that.
-    Stage 4 (dashboard verification prep): NEW (2026-07). Normalizes
-                                   for_dashboard.jsonl's node-id columns
-                                   to node00..nodeNN via McCray's
-                                   tools/normalize_node_ids.py, then runs
-                                   McCray's tools/generate_verification.py
-                                   against the same attacked_path stage 3
-                                   verified, producing
-                                   runs/<component_id>/verification.jsonl
-                                   -- the file data_feed.py's
-                                   verification_feed.py actually reads
-                                   for per-node status. Without this
-                                   stage the dashboard runs but shows
-                                   "--" (unclassified) for every node.
-                                   Runs the Verifier a second time
-                                   (generate_verification.py is
-                                   deliberately kept outside the
-                                   dashboard package -- see that file's
-                                   own docstring -- so it isn't merged
-                                   into stage 3's single pass); accepted
-                                   as the cost of respecting that
-                                   boundary rather than reaching into
-                                   McCross's tool internals.
-    Stage 5 (launch dashboard):   NEW (2026-07). Launches McCray's Dash
-                                   app (lanes/mccray_dashboard/dashboard/
+                                   for_dashboard.jsonl is consumed
+                                   DIRECTLY by McCray's dashboard --
+                                   data_feed.py reads its raw hostname
+                                   node-id columns as-is now, no
+                                   normalization step exists anywhere in
+                                   this pipeline.
+    Stage 4 (evaluate detection): NEW (2026-07) -- a different thing
+                                   from the old, now-removed Stage 4 that
+                                   used to live at this number
+                                   (node-id normalization; see prior
+                                   git history, not repeated here). This
+                                   one runs scripts/metrics.py against
+                                   this run's own ground truth
+                                   (check_path, from stage 2) and
+                                   for_scoreboard.jsonl (from stage 3),
+                                   printing a precision/recall/F1/FPR/
+                                   time-to-detection report straight to
+                                   the console. This is now deliberately
+                                   the ONLY console output this pipeline
+                                   produces by default -- see VERBOSE
+                                   below, which silences every other
+                                   stage's routine narration so a run's
+                                   console output IS this evaluation
+                                   report, not buried under step-by-step
+                                   status. metrics.py's assumed location
+                                   (scripts/metrics.py) has not been
+                                   confirmed against the real repo layout
+                                   yet -- see stage_4_evaluate_detection()'s
+                                   own docstring.
+    Stage 5 (launch dashboard):   Launches McCray's Dash app
+                                   (lanes/mccray_dashboard/dashboard/
                                    main.py) as a background process --
                                    non-blocking, since stage 6 (Blender)
                                    blocks until the viewport window is
                                    closed and both need to run at once.
                                    Terminated in main()'s finally block
                                    when Blender exits, so it never
-                                   orphans. Not yet confirmed working
-                                   end-to-end from inside a real browser
-                                   from this end -- main.py's own logic
-                                   wasn't touched, just how it's invoked.
+                                   orphans.
     Stage 6 (launch digital twin): REAL. Launches Blender with
                                    main_run.py, which reads
                                    for_digital_twin.jsonl (just written
@@ -92,23 +91,29 @@ STATUS OF EACH STAGE (2026-07):
 USAGE (2026-07 redesign -- fully interactive, no CLI flags to remember):
     python scripts/run_microverse.py
 
-You'll be walked through, in order:
-    1. Path to your raw datasets root folder (e.g. .../00_raw_datasets/)
-    2. Which dataset to ingest -- listed from whatever folders are
-       actually present there (training_*, inference_*)
-    3. How many nodes -- listed from whatever node-count folders exist
+CHANGED (2026-07): all data now lives in a fixed, repo-relative location
+-- data/rawdata/ at the repo root, the same path on every teammate's
+machine regardless of OS or username, not committed to git (space
+constraints). No path typing needed for any of it; you're walked
+through, in order:
+    1. Which dataset to ingest -- listed from whatever folders are
+       actually present under data/rawdata/00_raw_datasets/
+       (training_*, inference_*)
+    2. How many nodes -- listed from whatever node-count folders exist
        under the chosen dataset. This is NOT a fixed list -- different
        datasets genuinely have different options (confirmed:
        training_llama2_70b_lora only has 2/4/8/16node;
        training_stable_diffusion has 1/2/4/8/16node too). Always
        discovered from the real folders present, never hardcoded.
-    4. If (and only if) a training dataset was chosen: which SLURM job
+    3. If (and only if) a training dataset was chosen: which SLURM job
        ID -- discovered by scanning the selected node folder's actual
        filenames for the "..._slurmid_XXXXX_..." pattern, since one
        node folder can contain multiple separate training runs.
        Inference datasets skip this entirely -- they don't use one.
-    5. Path to the ENF CSV file
-    6. Component ID (defaults to rack_00)
+    4. Which ENF recording device and hour -- listed from whatever
+       DevN_ENF_HrNN.csv files are actually present under
+       data/rawdata/ENF-ML (CNN+MAMBA)/Data/
+    5. Component ID (defaults to rack_00)
 
 Then runs the full pipeline. When it reaches attack.py, that script's
 OWN interactive prompts take over the terminal directly -- this
@@ -122,8 +127,8 @@ at all (discover_nlr_pairs(folder, slurm_id=None)).
 """
 
 import argparse
-import os
 import json
+import os
 import random
 import re
 import subprocess
@@ -140,17 +145,20 @@ sys.path.insert(0, str(_REPO_ROOT / "lanes" / "leiva_verification"))
 
 # McCray's dashboard lane -- _DASHBOARD_DIR is where main.py/data_feed.py
 # live (confirmed by triangulating data_feed.py's own "../../leiva_verification"
-# path math against generate_verification.py's parents[3] repo-root math,
-# not guessed), _TOOLS_DIR holds the offline normalize/generate scripts
-# stage_4 below calls. Only _TOOLS_DIR goes on sys.path -- _DASHBOARD_DIR's
-# own modules (data_feed.py, models.py, etc.) are deliberately NOT imported
-# here; McCray's dashboard package must stay importable standalone with no
+# path math against the repo-root math the (now-deleted)
+# tools/generate_verification.py used, not guessed). Never imported here --
+# McCray's dashboard package must stay importable standalone with no
 # sibling-lane code present (see that package's own coupling-guard test),
-# so this script only ever launches it as a subprocess, never imports it.
+# so this script only ever launches it as a subprocess.
+#
+# REMOVED (2026-07, cleanup pass): _DASHBOARD_TOOLS_DIR and its sys.path
+# insert. This script used to import tools/normalize_node_ids.py for a
+# now-deleted node-id normalization stage -- data_feed.py discovers real
+# node ids directly from for_dashboard.jsonl now, so there's nothing left
+# in lanes/mccray_dashboard/tools/ for this script to call at all (that
+# whole directory has been deleted from the dashboard lane).
 _MCCRAY_DASHBOARD_ROOT = _REPO_ROOT / "lanes" / "mccray_dashboard"
 _DASHBOARD_DIR = _MCCRAY_DASHBOARD_ROOT / "dashboard"
-_DASHBOARD_TOOLS_DIR = _MCCRAY_DASHBOARD_ROOT / "tools"
-sys.path.insert(0, str(_DASHBOARD_TOOLS_DIR))
 
 from microverse_core.data_loaders import (
     load_enf,
@@ -161,6 +169,25 @@ from microverse_core.data_loaders import (
     write_combined_jsonl,
     read_combined_jsonl,
 )
+
+# CHANGED (2026-07): the "[N/5] doing X ..." progress narration scattered
+# through every stage below was genuinely useful while the dashboard
+# wasn't wired up yet -- it was the only visibility into what the
+# pipeline was doing. Now that the dashboard shows live results as soon
+# as it launches, that narration is redundant console noise. Gated behind
+# VERBOSE (default off) instead of deleted outright, so a future bug can
+# get that visibility back with a one-line flip instead of re-adding
+# print statements throughout the file. WARNING lines, the interactive
+# prompts in gather_inputs(), and the dashboard-shutdown notice at the
+# end of main() are deliberately NOT gated -- those indicate a real
+# problem, are part of the actual interactive UI, or explain an
+# otherwise-silent side effect, not routine status.
+VERBOSE = False
+
+
+def vprint(*args, **kwargs) -> None:
+    if VERBOSE:
+        print(*args, **kwargs)
 
 
 def prompt_choice(prompt_text: str, options: list) -> str:
@@ -175,17 +202,11 @@ def prompt_choice(prompt_text: str, options: list) -> str:
         print("  Invalid choice, try again.")
 
 
-def prompt_path(prompt_text: str, default: str = None) -> Path:
-    """Prompts for a filesystem path, re-asking until it actually exists."""
-    suffix = f" [{default}]" if default else ""
-    while True:
-        raw = input(f"{prompt_text}{suffix}: ").strip()
-        if not raw and default:
-            raw = default
-        path = Path(raw).expanduser()
-        if path.exists():
-            return path
-        print(f"  Path not found: {path} -- try again.")
+# REMOVED (2026-07): prompt_path() used to live here -- a free-text path
+# prompt for the raw datasets/ENF folders. Confirmed unused anywhere in
+# this file once those became fixed, auto-discovered locations under
+# data/rawdata/ (see gather_inputs() below) -- dead code, removed rather
+# than left behind to avoid implying paths are still user-typed anywhere.
 
 
 def _node_sort_key(folder_name: str) -> int:
@@ -246,19 +267,24 @@ def gather_inputs():
     print("Microverse-2026-Project -- Data Ingestion")
     print("=" * 70)
 
-    # Fixed, conventional locations -- not prompted for anymore. See
-    # README.md's "Where to put your data" section for the exact
-    # expected layout. Home directory resolved via os.path.expanduser,
-    # portable across usernames/machines rather than hardcoded to one
-    # person's account.
-    home = os.path.expanduser("~")
-    datasets_root = Path(home) / "Projects" / "00_raw_datasets"
+    # CHANGED (2026-07): was Path(home) / "Projects" / "00_raw_datasets" --
+    # home-directory-relative, meaning every teammate had to create a
+    # "Projects" folder in their own home directory and put data there
+    # by hand. Now repo-relative (data/rawdata/), matching the actual
+    # folder structure everyone's local clone has -- works identically
+    # on Windows/Mac/Linux with zero per-person setup, since _REPO_ROOT
+    # is self-locating (see its own comment above) and pathlib handles
+    # path separators correctly on every OS. Data lives in this folder
+    # locally on every machine but is NOT committed to git (space
+    # constraints) -- see .gitignore.
+    datasets_root = _REPO_ROOT / "data" / "rawdata" / "00_raw_datasets"
     if not datasets_root.exists():
         raise RuntimeError(
             f"Expected your raw NLR datasets at {datasets_root}, but that "
             f"folder doesn't exist. See README.md's \"Where to put your "
-            f"data\" section -- create that folder and put your dataset "
-            f"folders (training_*, inference_*) inside it."
+            f"data\" section -- create data/rawdata/00_raw_datasets/ at "
+            f"the repo root and put your dataset folders (training_*, "
+            f"inference_*) inside it."
         )
     dataset_options = sorted(p.name for p in datasets_root.iterdir() if p.is_dir())
     if not dataset_options:
@@ -304,13 +330,14 @@ def gather_inputs():
     else:
         print("  (no SLURM ID needed -- inference datasets don't use one)")
 
-    enf_folder = Path(home) / "Projects" / "ENF-ML (CNN+MAMBA)" / "Data"
+    # CHANGED (2026-07): same repo-relative move as datasets_root above.
+    enf_folder = _REPO_ROOT / "data" / "rawdata" / "ENF-ML (CNN+MAMBA)" / "Data"
     if not enf_folder.exists():
         raise RuntimeError(
             f"Expected your ENF data at {enf_folder}, but that folder "
             f"doesn't exist. See README.md's \"Where to put your data\" "
-            f"section -- create that folder and put your DevN_ENF_HrNN.csv "
-            f"files inside it."
+            f"section -- create data/rawdata/ENF-ML (CNN+MAMBA)/Data/ at "
+            f"the repo root and put your DevN_ENF_HrNN.csv files inside it."
         )
     devices = discover_enf_devices(enf_folder)
     if not devices:
@@ -368,7 +395,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
     of an attack silently erases it with zero detection. This is the
     one ordering rule in the whole pipeline that must never move.
     """
-    print(f"[1/6] Ingesting ENF from {args.enf_path} ...")
+    vprint(f"[1/5] Ingesting ENF from {args.enf_path} ...")
     enf = load_enf(args.enf_path)
     enf = combined_smooth(enf)
 
@@ -391,7 +418,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
         v + _enf_noise_rng.gauss(0, ENF_ALT_NOISE_STD) for v in enf
     ]
 
-    print(f"[1/6] Discovering NLR pairs in {args.nlr_folder} "
+    vprint(f"[1/5] Discovering NLR pairs in {args.nlr_folder} "
           f"(workload_type={args.workload_type}) ...")
     slurm_id = args.slurm_id if args.workload_type == "training" else None
     pairs = discover_nlr_pairs(args.nlr_folder, slurm_id=slurm_id)
@@ -400,7 +427,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
         pairs = [p for p in pairs if p[0] in args.node_ids]
         missing = set(args.node_ids) - {p[0] for p in pairs}
         if missing:
-            print(f"[1/6] WARNING: requested node IDs not found: {missing}")
+            vprint(f"[1/5] WARNING: requested node IDs not found: {missing}")
     elif args.node_count:
         pairs = sorted(pairs, key=lambda p: p[0])[:args.node_count]
 
@@ -410,7 +437,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
             "and --slurm-id are all correct for this run."
         )
 
-    print(f"[1/6] Using {len(pairs)} node(s): {sorted(p[0] for p in pairs)}")
+    vprint(f"[1/5] Using {len(pairs)} node(s): {sorted(p[0] for p in pairs)}")
     node_windows = load_nlr_multi(pairs)
     records = build_combined_records(enf, node_windows)
 
@@ -430,11 +457,11 @@ def stage_1_ingest_and_smooth(args) -> Path:
     out_path = Path(args.output_dir) / f"{out_filename}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_combined_jsonl(records, str(out_path))
-    print(f"[1/6] Wrote {len(records)} records -> {out_path}")
+    vprint(f"[1/5] Wrote {len(records)} records -> {out_path}")
     return out_path
 
 
-def stage_2_inject_attacks(clean_path: Path, args) -> Path:
+def stage_2_inject_attacks(clean_path: Path, args) -> tuple[Path, Path]:
     """
     Confirmed 2026-07 from reading attack.py's actual source:
 
@@ -466,11 +493,13 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     though our Verifier class happens to ignore unknown fields today
     (fragile to rely on that staying true). So this function returns
     BOTH paths as a tuple: (plain_path, check_path). Only plain_path
-    (found by stripping "_check" off the discovered check_path's name)
-    goes anywhere near stage_3/verification. check_path is carried
-    forward untouched, used only at the very end for scoring -- see
-    stage_4, which sends it to the scoreboard specifically and nowhere
-    else.
+    goes anywhere near stage_3/verification.
+
+    CHANGED (2026-07): check_path used to be discarded after being used
+    internally to locate plain_path -- now actually returned, since
+    stage_4 (metrics evaluation, new this week) needs it to find the
+    matching ground-truth file for scoring. Still never touches
+    verification itself -- stage_3 only ever receives plain_path.
     """
     import subprocess
     import time
@@ -493,9 +522,9 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
 
     node_count = args.actual_node_count
 
-    print(f"[2/6] Launching attack.py --nodes {node_count} "
+    vprint(f"[2/6] Launching attack.py --nodes {node_count} "
           f"(reads {clean_path}) ...")
-    print(f"[2/6] attack.py has its own interactive prompts -- answer those directly below.\n")
+    vprint(f"[2/6] attack.py has its own interactive prompts -- answer those directly below.\n")
     subprocess.run(
         ["python", "lanes/marchisano_attacks/attack.py", "--nodes", str(node_count)],
         check=True,
@@ -518,7 +547,7 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
             f"current behavior."
         )
     if len(new_files) > 1:
-        print(f"[2/6] WARNING: multiple files modified at once: "
+        vprint(f"[2/6] WARNING: multiple files modified at once: "
               f"{sorted(new_files)} -- using the most recently modified one, "
               f"but this ambiguity is worth understanding, not just working around.")
 
@@ -528,10 +557,9 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     # column -- that would undermine the entire point of independent
     # verification. attack.py writes a PLAIN file alongside the _check
     # one (same scenario ID, no ground truth added) -- that's what
-    # gets fed into stage 3, not this _check file. check_path is only
-    # used here, internally, to reliably locate plain_path -- Ethan
-    # handles ground truth/scoring separately with his own copy of the
-    # _check file, so nothing downstream of this function needs it.
+    # gets fed into stage 3, not this _check file. check_path is
+    # carried forward (see CHANGED note above) purely for stage 4's
+    # scoring use -- nothing else downstream of stage 2 touches it.
     plain_path = check_path.parent / check_path.name.replace("_check.jsonl", ".jsonl")
     if not plain_path.exists():
         raise FileNotFoundError(
@@ -542,8 +570,8 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
             f"verifier actually processes."
         )
 
-    print(f"[2/6] attack.py finished -> {plain_path} (fed to verifier)")
-    return plain_path
+    vprint(f"[2/6] attack.py finished -> {plain_path} (fed to verifier)")
+    return plain_path, check_path
 
 
 def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
@@ -591,7 +619,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     from anchor import AnchorExtractor
     from verification import Verifier
 
-    print(f"[3/6] Verifying {attacked_path} ...")
+    vprint(f"[3/6] Verifying {attacked_path} ...")
     records = list(read_combined_jsonl(str(attacked_path)))
     enf_list = [r["FRQ"] for r in records]
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
@@ -623,7 +651,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         (k.split("_gpu")[0] if "_gpu" in k else k.split("_cpu")[0])
         for k in sample_keys if "_gpu" in k or "_cpu" in k
     })
-    print(f"[3/6] {len(node_ids)} node column(s): {node_ids}")
+    vprint(f"[3/6] {len(node_ids)} node column(s): {node_ids}")
 
     out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -667,120 +695,75 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         for fh in handles.values():
             fh.close()
 
-    print(f"[3/6] Wrote {len(records)} verified records to 3 destinations:")
+    vprint(f"[3/6] Wrote {len(records)} verified records to 3 destinations:")
     for name, dest in destinations.items():
-        print(f"       {name:14s} -> {dest}")
+        vprint(f"       {name:14s} -> {dest}")
 
 
-def stage_4_generate_dashboard_verification(attacked_path: Path, args) -> None:
+def stage_4_evaluate_detection(check_path: Path, args) -> None:
     """
-    Prepares everything McCray's dashboard needs to show real per-node
-    verification status instead of "--" (unclassified) for every node.
-    Two real gaps, both closed here:
+    NEW (2026-07). Runs the scoring/evaluation tool against this run's
+    own ground-truth file (check_path, from stage 2) and
+    for_scoreboard.jsonl (just written by stage 3), letting its
+    multi-layer precision/recall/F1/FPR/time-to-detection report print
+    straight to the console. This is now deliberately the ONLY thing
+    this pipeline prints to the console by default -- see VERBOSE at
+    the top of this file, which now gates every other stage's routine
+    narration. The intent: a run's console output should BE this
+    evaluation report, not routine step-by-step status buried around
+    it.
 
-    1. for_dashboard.jsonl's node-id columns are whatever raw hostname
-       discover_nlr_pairs() found (e.g. "x3105c0s37b0n0_gpu-0[W]") --
-       the dashboard's data_feed.py only recognizes "node00".."nodeNN"
-       (_NODE_PREFIX_RE = r"^(node\\d+)_"). tools/normalize_node_ids.py
-       rewrites for_dashboard.jsonl in place to fix this, and returns
-       the exact raw-id -> node-id mapping it used.
-    2. runs/<component_id>/verification.jsonl -- the file
-       verification_feed.py actually reads for per-node status -- only
-       gets created by running tools/generate_verification.py. It's run
-       here against attacked_path (same file stage 3 just verified), so
-       its results match stage 3's exactly; the node ids inside its
-       component_id fields come out in the SAME raw-hostname form as
-       for_dashboard.jsonl started in, so the SAME rename mapping from
-       step 1 is applied again (normalize_verification_component_ids())
-       so both files agree on node identity.
+    CONFIRMED LOCATION (2026-07): microverse_core/metrics.py -- fixes an
+    earlier wrong guess (scripts/metrics.py, which doesn't exist; the
+    stage silently found nothing and skipped, and its own "not found"
+    warning was mistakenly gated behind vprint too, so a real run could
+    finish with zero indication the report never ran at all). Lines up
+    with microverse_core/__init__.py's own docstring, which already
+    listed "the scoring metrics" among what that package owns --
+    should have been the first place checked. The not-found warning
+    below is now a plain, always-visible print(), not vprint() -- a
+    missing evaluation report is exactly the kind of thing that must
+    never fail silently, unlike the routine step narration VERBOSE
+    gates everywhere else in this file.
 
-    Runs the Verifier a second, independent time (once here via
-    generate_verification.py's own subprocess, once already in stage 3)
-    rather than merging this into stage 3's single pass -- deliberate,
-    not an oversight: generate_verification.py's own docstring is
-    explicit that the dashboard package (and by extension the tooling
-    that feeds it) must stay importable with no sibling-lane code
-    coupled in, so this stays a genuinely separate, subprocess-launched
-    step instead of reaching into that boundary to save one Verifier
-    pass.
+    Scenario ID is derived directly from check_path's own filename
+    (e.g. "attack_304_check.jsonl" -> "304",
+    "attack_easy_2_check.jsonl" -> "easy_2") -- exactly the format
+    metrics.py's own resolve_project_paths() already expects (its own
+    docstring gives "304" or "easy_1" as examples), so this reuses
+    metadata attack.py already encoded in the filename rather than
+    re-deriving or guessing scenario identity a second time.
 
-    KNOWN, UNVERIFIED ASSUMPTION: the dashboard's data_feed.py currently
-    hardcodes DEFAULT_COMPONENT_ID = "rack_00" rather than reading it
-    from anywhere -- so this only actually shows up in the dashboard if
-    args.component_id for THIS run is also "rack_00". Warns rather than
-    silently doing nothing if it isn't, since fixing that hardcoding is
-    McCray's file, not this pipeline's call to make silently.
+    Deliberately does NOT use check=True / propagate a failure here --
+    a missing or malformed scoreboard file failing evaluation shouldn't
+    block the dashboard or digital twin from still launching after it;
+    those are independent concerns from scoring. metrics.py's own
+    main() already prints a clear error and exits non-zero on a real
+    problem (missing files, row-count mismatch, index misalignment) --
+    that output is not suppressed, so a failure here is still visible,
+    just not fatal to the rest of the run.
     """
-    from normalize_node_ids import normalize, normalize_verification_component_ids
+    _METRICS_SCRIPT = _REPO_ROOT / "microverse_core" / "metrics.py"
 
-    dashboard_jsonl = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs" / "for_dashboard.jsonl"
+    scenario_id = check_path.name.removeprefix("attack_").removesuffix("_check.jsonl")
 
-    print(f"[4/6] Normalizing node-id columns in {dashboard_jsonl} ...")
-    rename = normalize(dashboard_jsonl, dashboard_jsonl)
-    if rename:
-        for raw_id, node_id in rename.items():
-            print(f"       {raw_id} -> {node_id}")
-    else:
-        print("       WARNING: no node-prefixed columns found -- dashboard's "
-              "Operator/Analyst tabs will show zero nodes.")
-
-    print(f"[4/6] Running generate_verification.py against {attacked_path} "
-          f"(run-id={args.component_id}) ...")
-
-    # CRITICAL (2026-07, found after a real run): microverse_core's
-    # io_records.write_records() opens its output file in APPEND mode,
-    # not overwrite -- it was designed for incrementally logging a single
-    # long-running run, not for being re-invoked fresh each pipeline
-    # execution. Left alone, a second pipeline run (e.g. re-running after
-    # fixing an earlier crash, or just running the pipeline twice in one
-    # session) silently ACCUMULATES this run's VerificationResults on top
-    # of every previous run's, all keyed by the same small range of
-    # sample indices (0, 1, 2, ...) -- verify_sample() then aggregates
-    # every record for a given index across every run that ever wrote to
-    # this run_id and returns whichever is worst, blending stale
-    # scenarios into the live one. Symptom, confirmed against a real
-    # run: dashboard status/summary counts that don't match the current
-    # for_dashboard.jsonl and don't visibly change. Deleting the file
-    # here -- not touching io_records.py itself, which is Lance's shared
-    # contract file (see contracts.py's own "change these only by PR"
-    # rule) -- keeps this fix scoped to this pipeline's own stage
-    # instead of changing behavior every other lane relies on.
-    verification_path = _REPO_ROOT / "runs" / args.component_id / "verification.jsonl"
-    if verification_path.exists():
-        print(f"[4/6] Removing stale {verification_path} from a previous "
-              f"run first (write_records() appends, it doesn't overwrite) ...")
-        verification_path.unlink()
+    if not _METRICS_SCRIPT.exists():
+        print(f"[4/6] WARNING: metrics.py not found at {_METRICS_SCRIPT} -- "
+              f"skipping the evaluation report. If it's been moved, update "
+              f"_METRICS_SCRIPT's location in stage_4_evaluate_detection().")
+        return
 
     subprocess.run(
-        [
-            sys.executable,
-            str(_DASHBOARD_TOOLS_DIR / "generate_verification.py"),
-            "--input", str(attacked_path),
-            "--run-id", args.component_id,
-        ],
-        check=True,
+        [sys.executable, str(_METRICS_SCRIPT), "--id", scenario_id],
         cwd=str(_REPO_ROOT),
     )
-
-    changed = normalize_verification_component_ids(rename, verification_path)
-    print(f"[4/6] Normalized {changed} component_id(s) in {verification_path}")
-
-    if args.component_id != "rack_00":
-        print(
-            f"[4/6] WARNING: component_id for this run is '{args.component_id}', "
-            f"but the dashboard's data_feed.py hardcodes DEFAULT_COMPONENT_ID = "
-            f"\"rack_00\" -- it will look for runs/rack_00/verification.jsonl, "
-            f"not runs/{args.component_id}/verification.jsonl, and every node "
-            f"will show \"--\" (unclassified) status. This is a gap in "
-            f"McCray's file, not something this pipeline can fix for you."
-        )
 
 
 def stage_5_launch_dashboard():
     """
     Launches McCray's Dash app (lanes/mccray_dashboard/dashboard/main.py)
     as a background process -- non-blocking, via Popen rather than run(),
-    since stage 6 (Blender) blocks the main thread until its viewport
+    since stage 5 (Blender) blocks the main thread until its viewport
     window is closed and both processes need to be alive at the same
     time. Returns the Popen handle so main() can terminate it cleanly
     once Blender exits, rather than leaving an orphaned dashboard server
@@ -789,7 +772,16 @@ def stage_5_launch_dashboard():
     Launched with cwd=_DASHBOARD_DIR (not _REPO_ROOT) -- main.py's own
     imports (ui.layout, data_feed, etc.) are relative to that directory,
     the same way attack.py's and main_run.py's relative paths require
-    cwd=_REPO_ROOT for THEM specifically in stages 2 and 6.
+    cwd=_REPO_ROOT for THEM specifically in stages 2 and 5.
+
+    REMOVED (2026-07, cleanup pass): the normalization stage that used to
+    run before this one is gone entirely -- data_feed.py now discovers
+    real node ids directly from for_dashboard.jsonl's own raw hostname
+    column prefixes (e.g. "x3105c0s37b0n0_gpu-0[W]"), so there's nothing
+    left for this pipeline to prepare before launching the dashboard.
+    tools/normalize_node_ids.py, tools/generate_verification.py, and
+    verification_feed.py have all been deleted from the dashboard lane to
+    match (not just marked obsolete anymore).
 
     FIXED (2026-07, after a real run): a Popen() call returning
     successfully only means the process SPAWNED, not that it stayed
@@ -805,7 +797,7 @@ def stage_5_launch_dashboard():
     """
     DASHBOARD_STARTUP_GRACE_S = 1.5
 
-    print(f"[5/6] Launching dashboard (lanes/mccray_dashboard/dashboard/main.py) ...")
+    vprint(f"[5/6] Launching dashboard (lanes/mccray_dashboard/dashboard/main.py) ...")
     process = subprocess.Popen(
         [sys.executable, "main.py"],
         cwd=str(_DASHBOARD_DIR),
@@ -824,10 +816,61 @@ def stage_5_launch_dashboard():
             f"`pkill -9 -f main.py` first, then re-run."
         )
 
-    print(f"[5/6] Dashboard launched (pid={process.pid}) -- see main.py's own "
+    vprint(f"[5/6] Dashboard launched (pid={process.pid}) -- see main.py's own "
           f"app.run() call for the port (Dash defaults to 127.0.0.1:8050 "
           f"unless that's been changed).")
     return process
+
+
+def _resolve_blend_file() -> Path:
+    """
+    Scans data/rawdata/ for a .blend file, prompting if more than one
+    exists. MOVED here (2026-07) from main_run.py's own
+    _find_blend_file() -- necessary once stage_6 below started piping
+    and filtering Blender's stdout in real time to strip out its
+    per-tick render engine noise (see that function's own comment for
+    why). input()'s prompt text has no trailing newline, so a
+    line-buffered read loop over a piped stdout would never flush it
+    to the terminal -- Blender would sit there waiting for a response
+    to a question you can't see, a silent deadlock, not a hypothetical
+    risk. Resolving the choice HERE, in this process's own normal
+    terminal (never piped), and handing the result to Blender via
+    MICROVERSE_BLEND_FILE (main_run.py already checks this env var
+    first, before its own scan) means main_run.py never needs
+    interactive input through that pipe at all. main_run.py's own
+    _find_blend_file() is left in place as a fallback for anyone
+    running `blender --python main_run.py` directly, standalone,
+    outside this pipeline -- just never reached when launched from
+    here.
+    """
+    blend_dir = _REPO_ROOT / "data" / "rawdata"
+    if not blend_dir.is_dir():
+        raise RuntimeError(
+            f"Expected {blend_dir} to exist -- see README.md's "
+            f"\"Where to put your data\" section. Put your .blend file "
+            f"directly inside data/rawdata/ at the repo root."
+        )
+
+    blend_files = sorted(f for f in blend_dir.iterdir() if f.suffix.lower() == ".blend")
+
+    if not blend_files:
+        raise RuntimeError(
+            f"No .blend file found in {blend_dir}. See README.md's "
+            f"\"Where to put your data\" section -- put your .blend "
+            f"file directly inside data/rawdata/ at the repo root."
+        )
+
+    if len(blend_files) == 1:
+        return blend_files[0]
+
+    print(f"\nMultiple .blend files found in {blend_dir}:")
+    for i, f in enumerate(blend_files, 1):
+        print(f"  {i}. {f.name}")
+    while True:
+        raw = input(f"Which one? [1-{len(blend_files)}]: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(blend_files):
+            return blend_files[int(raw) - 1]
+        print("  Invalid choice, try again.")
 
 
 def stage_6_launch_digital_twin() -> None:
@@ -842,31 +885,71 @@ def stage_6_launch_digital_twin() -> None:
     the entire point of watching the twin update live. Runs with a
     normal, visible Blender window instead.
 
-    main_run.py has its own interactive prompt for the .blend file path
-    (remembers the last-used path across runs) -- inherits this
-    process's stdin/stdout so that prompt works correctly, same pattern
-    already used for attack.py's own interactive prompts in stage_2.
+    CHANGED (2026-07): .blend file selection now happens HERE, before
+    Blender is even launched, via _resolve_blend_file() above -- see
+    its own docstring for why. The result is passed through
+    MICROVERSE_BLEND_FILE so main_run.py's own scan is skipped
+    entirely.
 
-    Still a BLOCKING call (subprocess.run, not Popen) -- this is
-    deliberately the last thing main() does, so the pipeline "finishes"
-    exactly when the person closes the Blender window, matching how it
-    behaved before the dashboard was added.
+    CHANGED AGAIN (2026-07): switched from subprocess.run (inherits
+    stdout directly) to Popen with a real-time line filter. Blender's
+    own internal render engine logs two lines on EVERY viewport capture
+    tick ("Saved: '...'" / "OpenGL Render written to '...'") --
+    completely independent of anything in main_run.py's own print
+    statements (already gated behind that file's own VERBOSE flag --
+    this is a SEPARATE noise source, Blender's engine itself, not our
+    code, and could never have been silenced by fixing our own print()
+    calls). Filtered here line-by-line rather than redirecting stdout
+    to DEVNULL entirely, since that blunt approach would also swallow
+    genuine Blender errors/tracebacks along with the noise -- everything
+    else still passes through live, unfiltered, the moment each line
+    arrives. Bypassed (shows everything, unfiltered) when VERBOSE=True,
+    same override every other stage in this file already respects.
+
+    Still fundamentally a BLOCKING step -- process.wait() below still
+    holds this function open until Blender's window is closed, exactly
+    like the old subprocess.run(check=True) did, so the pipeline still
+    "finishes" exactly when the person closes the Blender window.
     """
-    print(f"[6/6] Launching Blender with the digital twin ...")
-    print(f"[6/6] main_run.py has its own prompt for the .blend file path -- answer that directly below.\n")
-    subprocess.run(
-        ["blender", "--python", "main_run.py"],
-        check=True,
+    vprint(f"[6/6] Launching Blender with the digital twin ...")
+
+    blend_path = os.environ.get("MICROVERSE_BLEND_FILE")
+    if not blend_path:
+        blend_path = str(_resolve_blend_file())
+
+    env = os.environ.copy()
+    env["MICROVERSE_BLEND_FILE"] = blend_path
+
+    _BLENDER_NOISE_PATTERNS = ("Saved: '", "OpenGL Render written to")
+    command = ["blender", "--python", "main_run.py"]
+
+    process = subprocess.Popen(
+        command,
         cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
+
+    for line in process.stdout:
+        stripped = line.rstrip("\n")
+        if not VERBOSE and any(p in stripped for p in _BLENDER_NOISE_PATTERNS):
+            continue
+        print(stripped, flush=True)
+
+    process.wait()
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command)
 
 
 def main():
     args = gather_inputs()
     clean_path = stage_1_ingest_and_smooth(args)
-    attacked_path = stage_2_inject_attacks(clean_path, args)
+    attacked_path, check_path = stage_2_inject_attacks(clean_path, args)
     stage_3_verify_and_fork(attacked_path, args)
-    stage_4_generate_dashboard_verification(attacked_path, args)
+    stage_4_evaluate_detection(check_path, args)
 
     dashboard_process = stage_5_launch_dashboard()
     try:
@@ -875,7 +958,7 @@ def main():
         # Blender closed (or crashed/raised) -- don't leave the dashboard
         # server running as an orphaned background process either way.
         if dashboard_process.poll() is None:
-            print("[6/6] Blender exited -- stopping the dashboard process ...")
+            vprint("[6/6] Blender exited -- stopping the dashboard process ...")
             dashboard_process.terminate()
             try:
                 dashboard_process.wait(timeout=5)

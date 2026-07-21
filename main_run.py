@@ -2,23 +2,68 @@ import sys
 import os
 import json
 import importlib
+import tempfile
 import bpy
+
+# CHANGED (2026-07): matches the same VERBOSE/vprint convention added to
+# scripts/run_microverse.py -- the per-frame "Grid: X Hz | ..." line
+# below printed on every single simulation tick (every 2 seconds),
+# which is exactly the kind of routine narration that's redundant now
+# that the dashboard and digital twin show the same information live.
+# Default off. Real warnings (missing scene objects, per-frame write
+# failures) and the interactive .blend-file disambiguation prompt are
+# deliberately NOT gated -- those indicate a real problem or are the
+# actual interactive UI, not routine status.
+VERBOSE = False
+
+
+def vprint(*args, **kwargs) -> None:
+    if VERBOSE:
+        print(*args, **kwargs)
+
+
+# ==========================================================================
+# 📂 REPOSITORY PATH ALIGNMENT
+# ==========================================================================
+# Was hardcoded to Baron's own home directory -- broke the moment this
+# ran on anyone else's machine (ModuleNotFoundError on blender_bridge,
+# since /home/Baron/... simply doesn't exist elsewhere). Self-locating
+# now: this file lives at the repo root, so its own real location on
+# disk IS the repo root, on any machine, no editing needed per person.
+#
+# MOVED (2026-07): this used to be defined AFTER _find_blend_file() ran
+# (see below) -- but that function now needs REPO_ROOT itself, to scan
+# data/rawdata/ instead of ~/Projects/, so this has to come first.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 
 def _find_blend_file():
     """
-    Scans ~/Projects/ for a .blend file -- fixed, conventional location,
-    not prompted for anymore (see README.md's "Where to put your data"
-    section). Auto-selects if exactly one is found, the common case;
-    if multiple exist, asks which one (a real choice, not location
-    bookkeeping); if none exist, fails with a clear, actionable message
-    rather than a confusing downstream crash.
+    Scans data/rawdata/ (repo-relative -- same convention
+    scripts/run_microverse.py's gather_inputs() already uses for the raw
+    NLR datasets and ENF data, not prompted for anymore -- see
+    README.md's "Where to put your data" section) for a .blend file.
+    Auto-selects if exactly one is found, the common case; if multiple
+    exist, asks which one (a real choice, not location bookkeeping); if
+    none exist, fails with a clear, actionable message rather than a
+    confusing downstream crash.
+
+    CHANGED (2026-07): was ~/Projects/, home-directory-relative --
+    meant every teammate had to create a "Projects" folder in their own
+    home directory and put the .blend file there by hand, a different
+    real path per person/OS. Now repo-relative (data/rawdata/), the
+    exact same folder scripts/run_microverse.py already reads the raw
+    datasets and ENF data from -- one shared location, works identically
+    on Windows/Mac/Linux with zero per-person setup. Data lives in this
+    folder locally on every machine but is NOT committed to git (space
+    constraints) -- see .gitignore.
     """
-    projects_dir = os.path.expanduser("~/Projects")
+    projects_dir = os.path.join(REPO_ROOT, "data", "rawdata")
     if not os.path.isdir(projects_dir):
         raise FileNotFoundError(
             f"Expected {projects_dir} to exist -- see README.md's "
             f"\"Where to put your data\" section. Put your .blend file "
-            f"directly inside ~/Projects/."
+            f"directly inside data/rawdata/ at the repo root."
         )
 
     blend_files = sorted(f for f in os.listdir(projects_dir) if f.lower().endswith(".blend"))
@@ -27,12 +72,12 @@ def _find_blend_file():
         raise FileNotFoundError(
             f"No .blend file found in {projects_dir}. See README.md's "
             f"\"Where to put your data\" section -- put your .blend file "
-            f"directly inside ~/Projects/."
+            f"directly inside data/rawdata/ at the repo root."
         )
 
     if len(blend_files) == 1:
         chosen = blend_files[0]
-        print(f"🔎 Found .blend file: {chosen}")
+        vprint(f"🔎 Found .blend file: {chosen}")
     else:
         print(f"\nMultiple .blend files found in {projects_dir}:")
         for i, f in enumerate(blend_files, 1):
@@ -52,13 +97,13 @@ def _find_blend_file():
 # ==========================================================================
 # MICROVERSE_BLEND_FILE, if set, skips the scan entirely -- useful for
 # non-interactive/automated runs. Otherwise auto-discovered from
-# ~/Projects/ via _find_blend_file above.
+# data/rawdata/ via _find_blend_file above.
 TARGET_BLEND_FILE = os.environ.get("MICROVERSE_BLEND_FILE") or _find_blend_file()
 
 # If the runner launches a default blank project, dynamically open your file
 if bpy.data.filepath != TARGET_BLEND_FILE:
     if os.path.exists(TARGET_BLEND_FILE):
-        print(f"🔄 Hot-loading target twin project: {TARGET_BLEND_FILE}")
+        vprint(f"🔄 Hot-loading target twin project: {TARGET_BLEND_FILE}")
         bpy.ops.wm.open_mainfile(filepath=TARGET_BLEND_FILE)
     else:
         raise FileNotFoundError(
@@ -69,16 +114,6 @@ if bpy.data.filepath != TARGET_BLEND_FILE:
             f"then run again and provide its correct path when prompted."
         )
 
-
-# ==========================================================================
-# 📂 REPOSITORY PATH ALIGNMENT
-# ==========================================================================
-# Was hardcoded to Baron's own home directory -- broke the moment this
-# ran on anyone else's machine (ModuleNotFoundError on blender_bridge,
-# since /home/Baron/... simply doesn't exist elsewhere). Self-locating
-# now: this file lives at the repo root, so its own real location on
-# disk IS the repo root, on any machine, no editing needed per person.
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
@@ -133,8 +168,8 @@ class RealTimeSimulationRunner:
         self.step = 0
         self.file_handle = None
 
-        print(f"\n🚀 Connecting Ingestion Engine to Pre-Existing Scene for Run: {run_id}")
-        print(f"📂 Source Data Path: {self.file_path}")
+        vprint(f"\n🚀 Connecting Ingestion Engine to Pre-Existing Scene for Run: {run_id}")
+        vprint(f"📂 Source Data Path: {self.file_path}")
 
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"Critical Error: Missing data file at {self.file_path}")
@@ -156,7 +191,7 @@ class RealTimeSimulationRunner:
             for k in first_record.keys()
             if "_gpu" in k or "_cpu" in k
         })
-        print(f"🔎 Discovered {len(self.nodes)} node(s) from data: {self.nodes}")
+        vprint(f"🔎 Discovered {len(self.nodes)} node(s) from data: {self.nodes}")
         # Rewind so process_next_line() sees this same first record again --
         # discovery shouldn't consume a real simulation step.
         self.file_handle.seek(0)
@@ -188,7 +223,7 @@ class RealTimeSimulationRunner:
             print(f"⚠️ WARNING: The following objects were not found in your scene tree: {missing_components}")
             print(f"⚠️ This usually means the scene doesn't yet have objects for every node this run's data actually contains -- add them, or this run's node count/IDs won't fully display.")
         else:
-            print("✨ Success! All hardware components matched your workspace tree layout perfectly.")
+            vprint("✨ Success! All hardware components matched your workspace tree layout perfectly.")
 
 
     def process_next_line(self):
@@ -198,7 +233,7 @@ class RealTimeSimulationRunner:
             
         line = self.file_handle.readline()
         if not line or not line.strip():
-            print(f"✅ Real-time asset stream complete. Reached end of file.")
+            vprint(f"✅ Real-time asset stream complete. Reached end of file.")
             self.file_handle.close()
             return None
             
@@ -291,7 +326,7 @@ class RealTimeSimulationRunner:
         # --- 4. EXPORT SNAPSHOTS TO RUNS DIRECTORY ---
         io_records.write_records(self.run_id, "power", frame_records)
 
-        print(f"⏰ [Line Entry {data.get('index')}] Grid: {freq_val:.4f} Hz | {' | '.join(status_summary)}")
+        vprint(f"⏰ [Line Entry {data.get('index')}] Grid: {freq_val:.4f} Hz | {' | '.join(status_summary)}")
         if write_failures:
             print(f"   ⚠️ {len(write_failures)} object write(s) failed (not in scene): {sorted(set(write_failures))}")
         
@@ -308,7 +343,7 @@ class RealTimeSimulationRunner:
         return 2.0
 
 
-def _capture_viewport(filepath="/tmp/blender_viewport.png"):
+def _capture_viewport(filepath=None):
     """
     Grabs a fast OpenGL capture of the 3D viewport and writes it to disk
     as a PNG -- this exact path is what the dashboard's
@@ -316,7 +351,22 @@ def _capture_viewport(filepath="/tmp/blender_viewport.png"):
     (mtime-based) to show a "Live Digital Twin" preview. Uses
     render.opengl (a viewport snapshot) rather than a full render --
     cheap enough to call every simulation tick.
+
+    CHANGED (2026-07): default filepath was a hardcoded "/tmp/..." --
+    /tmp doesn't exist on Windows at all, which would have silently
+    broken the whole Live Digital Twin panel for the new Windows
+    teammate (this function would raise, or Blender would error trying
+    to write to a nonexistent root path). tempfile.gettempdir() resolves
+    to the correct OS temp directory on Windows/Mac/Linux alike. Both
+    this file and ui/blender_feed.py's IMG_PATH must resolve to the
+    SAME actual path for the hand-off to work -- they're two separate
+    processes (Blender and the dashboard) on the same machine, so this
+    only works because tempfile.gettempdir() is deterministic per-OS,
+    not because they coordinate directly.
     """
+    if filepath is None:
+        filepath = os.path.join(tempfile.gettempdir(), "blender_viewport.png")
+
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             if area.type == 'VIEW_3D':

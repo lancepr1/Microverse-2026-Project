@@ -42,11 +42,19 @@ from verification import (
     _NLRMonotonicityCheck,
     _GPUTempRangeCheck,
     _GPUTempContinuityCheck,
+    _NLRStartupRampCheck,
+    _NLRReplayCheck,
     CONFIDENCE_SUSPECT,
     CONFIDENCE_TRUSTED,
     GPU_POWER_CEILING_W,
     CPU_UJ_WRAP_CEILING,
     CUSUM_THRESHOLD,
+    GPU_STARTUP_MIN_W,
+    GPU_STARTUP_MAX_W,
+    GPU_STARTUP_DEADLINE_WINDOWS,
+    GPU_SUSTAIN_SAMPLES,
+    REPLAY_MATCH_LENGTH,
+    REPLAY_LOOKBACK_WINDOW,
 )
 
 _results = []
@@ -543,6 +551,329 @@ def test_coordinated_attack_at_majority_evades_KNOWN_LIMITATION():
     untouched = [find(r10, f"{n}_cpu-0[W]").status for n in nodes[8:]]
     check("Uncompromised nodes remain TRUSTED during the coordinated attack",
           all(s == "trusted" for s in untouched), untouched)
+
+
+# ---------------------------------------------------------------------------
+# Startup-ramp check tests -- added 2026-07. Calibration (GPU_STARTUP_MIN_W/
+# MAX_W/DEADLINE_WINDOWS/SUSTAIN_SAMPLES) came from 4 real clean node-runs
+# (nvml_wattameter logs, SLURM jobs 10742795/10742796) -- see verification.py's
+# own comment block above those constants for the full history. The "noisy
+# real transition" test below reproduces an ACTUAL observed sequence from
+# that data, not a synthetic approximation.
+# ---------------------------------------------------------------------------
+
+def test_startup_ramp_check_no_flag_before_deadline():
+    """A channel stuck at idle-level wattage must never flag while still
+    inside the grace period, no matter how low the value is -- this
+    check's whole design is to withhold judgment until the deadline."""
+    c = _NLRStartupRampCheck()
+    statuses = []
+    for _ in range(GPU_STARTUP_DEADLINE_WINDOWS - 5):
+        record = {"node_A_gpu-0[W]": 70.0}  # idle-level, well below GPU_STARTUP_MIN_W
+        results = c.check(record)
+        statuses.append(results["node_A_gpu-0[W]"][0])
+    check("StartupRampCheck: never flags idle-level wattage before the deadline",
+          all(s == "trusted" for s in statuses),
+          f"{sum(1 for s in statuses if s != 'trusted')} non-trusted windows")
+
+
+def test_startup_ramp_check_flags_after_deadline_if_never_stabilized():
+    """A channel that NEVER reaches the target range must FAILED once the
+    deadline passes, with a reason naming what's wrong."""
+    c = _NLRStartupRampCheck()
+    last_result = None
+    for _ in range(GPU_STARTUP_DEADLINE_WINDOWS + 10):
+        record = {"node_A_gpu-0[W]": 70.0}
+        results = c.check(record)
+        last_result = results["node_A_gpu-0[W]"]
+    status, reason = last_result
+    check("StartupRampCheck: flags FAILED once deadline passes with no stabilization",
+          status == "failed" and "STARTUP RAMP" in reason, (status, reason))
+
+
+def test_startup_ramp_check_passes_when_stabilizes_in_time():
+    """A channel that genuinely ramps into range well before the deadline,
+    and holds, must stay TRUSTED for the rest of the run -- including
+    past the deadline itself."""
+    c = _NLRStartupRampCheck()
+    statuses = []
+    for i in range(GPU_STARTUP_DEADLINE_WINDOWS + 20):
+        val = 70.0 if i < 100 else 500.0  # ramps at index 100, well inside deadline
+        record = {"node_A_gpu-0[W]": val}
+        results = c.check(record)
+        statuses.append(results["node_A_gpu-0[W]"][0])
+    check("StartupRampCheck: stays TRUSTED once genuinely stabilized, past the deadline too",
+          all(s == "trusted" for s in statuses),
+          f"{sum(1 for s in statuses if s != 'trusted')} non-trusted windows")
+
+
+def test_startup_ramp_check_tolerates_noisy_real_transition():
+    """Reproduces an ACTUAL sequence observed in real clean NVML data
+    (node x3102c0s25b0n0, gpu-0[W], resampled to the 2-second/index
+    cadence) -- the real transition bounces between idle and full
+    steady-state several times before locking in. This must NEVER flag
+    FAILED at any point, including during the bounce -- judging a single
+    sample here is exactly the false-positive risk this check's design
+    exists to avoid."""
+    c = _NLRStartupRampCheck()
+    idle = [70.0] * 130
+    real_bounce = [407.8, 529.7, 283.8, 443.5, 557.6, 555.3, 554.8, 367.6, 124.1, 124.2, 436.0]
+    steady = [649.0] * 80  # locks in for good after the bounce, matching real data
+    sequence = idle + real_bounce + steady
+
+    statuses = []
+    for val in sequence:
+        record = {"node_A_gpu-0[W]": val}
+        results = c.check(record)
+        statuses.append(results["node_A_gpu-0[W]"][0])
+
+    check("StartupRampCheck: never flags FAILED during the real noisy ramp transition",
+          all(s != "failed" for s in statuses),
+          f"FAILED at indices {[i for i, s in enumerate(statuses) if s == 'failed']}")
+
+
+def test_startup_ramp_check_sticky_until_recovery():
+    """A channel that never stabilizes by the deadline stays FAILED
+    (sticky) until it genuinely does -- then recovers to TRUSTED, same
+    recovery philosophy as _NLRSustainedDeviationCheck."""
+    c = _NLRStartupRampCheck()
+
+    # Never stabilizes through the deadline -- should be FAILED by the end
+    for _ in range(GPU_STARTUP_DEADLINE_WINDOWS + 5):
+        results = c.check({"node_A_gpu-0[W]": 70.0})
+    check("StartupRampCheck: FAILED (sticky) well past the deadline with no recovery yet",
+          results["node_A_gpu-0[W]"][0] == "failed", results["node_A_gpu-0[W]"])
+
+    # Now genuinely stabilizes -- should clear back to TRUSTED and stay there
+    for _ in range(GPU_SUSTAIN_SAMPLES + 3):
+        results = c.check({"node_A_gpu-0[W]": 500.0})
+    check("StartupRampCheck: recovers to TRUSTED once genuinely stabilized late",
+          results["node_A_gpu-0[W]"][0] == "trusted", results["node_A_gpu-0[W]"])
+
+    # And stays trusted afterward, even outside the range briefly is not
+    # this check's concern anymore (it graduated) -- but confirm at least
+    # a continued in-range reading stays trusted.
+    results = c.check({"node_A_gpu-0[W]": 510.0})
+    check("StartupRampCheck: stays TRUSTED after recovering, doesn't re-flag",
+          results["node_A_gpu-0[W]"][0] == "trusted", results["node_A_gpu-0[W]"])
+
+
+def test_startup_ramp_check_multi_node_isolation():
+    """One node stuck at idle must FAILED independently of a sibling node
+    that stabilizes normally -- one node's startup problem must never
+    affect another's result."""
+    c = _NLRStartupRampCheck()
+    results = None
+    for i in range(GPU_STARTUP_DEADLINE_WINDOWS + 10):
+        record = {
+            "node_stuck_gpu-0[W]": 70.0,                          # never stabilizes
+            "node_ok_gpu-0[W]": 70.0 if i < 50 else 550.0,          # stabilizes early
+        }
+        results = c.check(record)
+    check("StartupRampCheck: stuck node FAILED",
+          results["node_stuck_gpu-0[W]"][0] == "failed", results["node_stuck_gpu-0[W]"])
+    check("StartupRampCheck: sibling node that stabilized stays TRUSTED, unaffected",
+          results["node_ok_gpu-0[W]"][0] == "trusted", results["node_ok_gpu-0[W]"])
+
+
+def test_startup_ramp_check_wired_into_verifier_end_to_end():
+    """Confirms the check is actually reachable through the real
+    Verifier.verify() pipeline, not just the standalone class -- a
+    channel stuck at idle wattage for the whole run must show up FAILED
+    with a STARTUP RAMP reason in the real merged VerificationResult."""
+    n = GPU_STARTUP_DEADLINE_WINDOWS + 10
+    records = make_records(n, node_ids=("node_A",))
+    # base_node_record() already sets gpu-0[W]=70.0 (idle-level, well
+    # under GPU_STARTUP_MIN_W) for every record -- no override needed.
+    results = run_verifier(records)
+    last = results[n - 1]
+    r = find(last, "node_A_gpu-0[W]")
+    check("StartupRampCheck: reachable end-to-end through Verifier.verify()",
+          r is not None and r.status == "failed" and "STARTUP RAMP" in r.reason,
+          r.reason if r else None)
+
+
+def test_startup_ramp_check_does_not_mask_other_failures():
+    """Demonstrates the merge-override property this check was
+    specifically designed to participate in, not opt out of: a channel
+    still inside its OWN startup grace period (this check alone would
+    say TRUSTED) but that ALSO has a hard, independent violation from a
+    different check (here: _NLRRangeCheck's impossible-wattage guard)
+    must still come out FAILED overall. No special-casing was added for
+    this -- it falls straight out of _merge_key_results' existing
+    worst-of merge. This is the exact mechanism that will let a future
+    replay-detection check override this one the same way, once built."""
+    records = make_records(5, node_ids=("node_A",))
+    records[2]["node_A_gpu-0[W]"] = -50.0  # impossible -- _NLRRangeCheck's job
+    results = run_verifier(records)
+    r = find(results[2], "node_A_gpu-0[W]")
+    check("StartupRampCheck: a channel still in its own grace period can still "
+          "be overridden FAILED by a different check on the same window",
+          r is not None and r.status == "failed" and "OUT OF RANGE" in r.reason,
+          r.reason if r else None)
+
+
+# ---------------------------------------------------------------------------
+# Replay check tests -- added 2026-07. REPLAY_MATCH_LENGTH/
+# REPLAY_LOOKBACK_WINDOW are reasoned from attack.py's documented ~90-sample
+# cycle, not yet validated against a confirmed real Replay-engine attack
+# file -- see the constants' own comments in verification.py.
+# ---------------------------------------------------------------------------
+
+def test_replay_check_no_false_positive_on_naturally_varying_data():
+    """Continuously varying (never-repeating) synthetic data must never
+    flag -- this is the baseline false-positive check."""
+    c = _NLRReplayCheck()
+    statuses = []
+    for i in range(300):
+        val = 100.0 + (i % 37) * 1.3 + (i % 11) * 0.07  # varies, never exactly repeats a 4-run
+        results = c.check({"node_A_gpu-0[W]": val})
+        if "node_A_gpu-0[W]" in results:
+            statuses.append(results["node_A_gpu-0[W]"][0])
+    check("ReplayCheck: no false positives on naturally varying data",
+          all(s != "failed" for s in statuses),
+          f"FAILED at {sum(1 for s in statuses if s == 'failed')} windows")
+
+
+def test_replay_check_ignores_degenerate_flat_repeats():
+    """A perfectly flat/frozen value must NOT flag -- see the class's
+    own FIXED note: this is a real bug found by this exact test fixture
+    during development, not a hypothetical."""
+    c = _NLRReplayCheck()
+    statuses = []
+    for _ in range(300):
+        results = c.check({"node_A_gpu-0[W]": 70.0})  # perfectly constant
+        if "node_A_gpu-0[W]" in results:
+            statuses.append(results["node_A_gpu-0[W]"][0])
+    check("ReplayCheck: does not flag a perfectly flat/frozen reading",
+          all(s != "failed" for s in statuses),
+          f"FAILED at {sum(1 for s in statuses if s == 'failed')} windows")
+
+
+def test_replay_check_detects_repeated_varying_subsequence():
+    """A genuinely varying subsequence that recurs later must be caught.
+    Feeds unique values, then re-emits the same REPLAY_MATCH_LENGTH-long
+    varying run partway through -- must flag FAILED with REPLAY in the
+    reason at the moment the repeat completes."""
+    c = _NLRReplayCheck()
+    values = [100.0 + i * 0.37 for i in range(30)]  # 30 unique, varying values
+    replay_start = 10
+    replayed_chunk = values[replay_start:replay_start + REPLAY_MATCH_LENGTH]
+    sequence = values[:20] + replayed_chunk  # re-emits an earlier varying run
+
+    last_result = None
+    for val in sequence:
+        results = c.check({"node_A_gpu-0[W]": val})
+        last_result = results.get("node_A_gpu-0[W]")
+
+    check("ReplayCheck: catches a genuinely varying subsequence repeating",
+          last_result is not None and last_result[0] == "failed" and "REPLAY" in last_result[1],
+          last_result)
+
+
+def test_replay_check_first_cycle_invisible_second_cycle_caught():
+    """Reproduces attack.py's real mechanism: cycles a fixed source
+    window (here, length REPLAY_LOOKBACK_WINDOW // 2, comfortably under
+    the lookback) twice in a row. The FIRST cycle must NOT be caught
+    (nothing earlier to compare against yet, per the documented
+    tradeoff) -- the SECOND cycle must be caught quickly once it
+    overlaps the first."""
+    c = _NLRReplayCheck()
+    cycle_len = REPLAY_LOOKBACK_WINDOW // 2
+    cycle = [50.0 + (i % 13) * 2.1 + (i % 5) * 0.3 for i in range(cycle_len)]
+
+    first_cycle_flagged = False
+    for val in cycle:
+        results = c.check({"node_A_gpu-0[W]": val})
+        r = results.get("node_A_gpu-0[W]")
+        if r and r[0] == "failed":
+            first_cycle_flagged = True
+    check("ReplayCheck: first cycle through a replayed window is NOT caught (documented tradeoff)",
+          not first_cycle_flagged, "flagged during first cycle -- should not have")
+
+    second_cycle_flagged_by = None
+    for i, val in enumerate(cycle):
+        results = c.check({"node_A_gpu-0[W]": val})
+        r = results.get("node_A_gpu-0[W]")
+        if r and r[0] == "failed" and second_cycle_flagged_by is None:
+            second_cycle_flagged_by = i
+    check("ReplayCheck: second cycle through the SAME replayed window IS caught",
+          second_cycle_flagged_by is not None,
+          "never flagged during the second cycle")
+
+
+def test_replay_check_recovers_after_clean_run():
+    """After a detected repeat, GPU_SUSTAIN_SAMPLES consecutive windows
+    with no NEW repeat must clear the flag back to TRUSTED -- this
+    check was built with working recovery from the start, specifically
+    to avoid the unsatisfiable-recovery bug found in
+    _NLRSustainedDeviationCheck."""
+    c = _NLRReplayCheck()
+    values = [100.0 + i * 0.37 for i in range(30)]
+    replayed_chunk = values[10:10 + REPLAY_MATCH_LENGTH]
+    sequence = values[:20] + replayed_chunk  # triggers a FAILED
+
+    for val in sequence:
+        results = c.check({"node_A_gpu-0[W]": val})
+    check("ReplayCheck: FAILED immediately after a detected repeat",
+          results["node_A_gpu-0[W]"][0] == "failed", results["node_A_gpu-0[W]"])
+
+    # Feed enough genuinely fresh, non-repeating values to clear
+    last_result = None
+    for i in range(GPU_SUSTAIN_SAMPLES + 5):
+        val = 900.0 + i * 1.7  # fresh range, never appeared in history before
+        results = c.check({"node_A_gpu-0[W]": val})
+        if "node_A_gpu-0[W]" in results:
+            # Once recovered, the check correctly goes silent on calm
+            # windows (same convention _NLRSustainedDeviationCheck
+            # already uses) -- track the LAST time it actually reported,
+            # not the last call, or a later silent call would wrongly
+            # overwrite this with None.
+            last_result = results["node_A_gpu-0[W]"]
+    check("ReplayCheck: recovers to TRUSTED after enough clean windows",
+          last_result is not None and last_result[0] == "trusted", last_result)
+
+
+def test_replay_check_multi_channel_isolation():
+    """One channel replaying must not affect a sibling channel that's
+    varying normally."""
+    c = _NLRReplayCheck()
+    values = [100.0 + i * 0.37 for i in range(30)]
+    replayed_chunk = values[10:10 + REPLAY_MATCH_LENGTH]
+    replay_sequence = values[:20] + replayed_chunk
+
+    results = None
+    for i, val in enumerate(replay_sequence):
+        record = {
+            "node_replay_gpu-0[W]": val,
+            "node_clean_gpu-0[W]": 200.0 + i * 0.53,  # continuously varying, never repeats
+        }
+        results = c.check(record)
+
+    check("ReplayCheck: replaying channel FAILED",
+          results["node_replay_gpu-0[W]"][0] == "failed", results["node_replay_gpu-0[W]"])
+    check("ReplayCheck: sibling channel varying normally stays TRUSTED/unflagged",
+          results.get("node_clean_gpu-0[W]", ("trusted",))[0] != "failed",
+          results.get("node_clean_gpu-0[W]"))
+
+
+def test_replay_check_wired_into_verifier_end_to_end():
+    """Confirms the check is actually reachable through the real
+    Verifier.verify() pipeline."""
+    n = 40
+    base_values = [150.0 + i * 1.1 for i in range(n)]
+    records = make_records(n, node_ids=("node_A",))
+    replayed_chunk = base_values[5:5 + REPLAY_MATCH_LENGTH]
+    for i, val in enumerate(base_values[:25] + replayed_chunk):
+        if i < len(records):
+            records[i]["node_A_gpu-0[W]"] = val
+
+    results = run_verifier(records[:25 + REPLAY_MATCH_LENGTH])
+    last_idx = 24 + REPLAY_MATCH_LENGTH
+    r = find(results[last_idx], "node_A_gpu-0[W]")
+    check("ReplayCheck: reachable end-to-end through Verifier.verify()",
+          r is not None and r.status == "failed" and "REPLAY" in r.reason,
+          r.reason if r else None)
 
 
 # ---------------------------------------------------------------------------
