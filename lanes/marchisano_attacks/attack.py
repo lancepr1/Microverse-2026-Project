@@ -15,6 +15,7 @@ OUTPUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 
 # =====================================================================
 # SCENARIO PRESET DICTIONARIES (3 ENF/ALL, 2 NLR per difficulty tier)
+# Distribution across ENF scenarios: 1 Replay, 2 Drifts, 3 Injections
 # =====================================================================
 PRESET_SCENARIOS = {
     2: [  # Medium Scenarios
@@ -29,7 +30,7 @@ PRESET_SCENARIOS = {
         },
         {
             "id": "202",
-            "name": "Scenario 202 (ENF)",  # Continuous Linear Grid Frequency Drift
+            "name": "Scenario 202 (ENF)",  # Continuous Linear Grid Frequency Drift (Drift #1)
             "type": "drift",
             "target_group": "frq",
             "start_pct": 0.20,
@@ -47,23 +48,23 @@ PRESET_SCENARIOS = {
         },
         {
             "id": "204",
-            "name": "Scenario 204 (ENF)",  # Anchored Grid Frequency Replay
-            "type": "replay",  
+            "name": "Scenario 204 (ENF)",  # Step Grid Frequency Offset Injection (Injection #1)
+            "type": "injection",  
             "target_group": "frq",
             "start_pct": 0.40,
             "end_pct": 0.80,
-            "params": {"source_start_pct": 0.05}
+            "params": {"type": "bias", "value": 0.05}
         },
         {
             "id": "205",
-            "name": "Scenario 205 (ENF)",  # Jittery Baseline Frequency Shift
+            "name": "Scenario 205 (ENF)",  # Jittery Baseline Frequency Shift (Injection #2)
             "type": "injection",
             "target_group": "frq",
             "start_pct": 0.25,
             "end_pct": 0.75,
             "params": {
                 "type": "bias", 
-                "value": -0.04,
+                "value": -0.2,
                 "jitter": 0.002
             }
         }
@@ -80,15 +81,14 @@ PRESET_SCENARIOS = {
         },
         {
             "id": "302",
-            "name": "Scenario 302 (ENF)",  # Conditional High-Variance Grid Replay
-            "type": "replay",
+            "name": "Scenario 302 (ENF)",  # Microscopic Frequency Scale Injection (Injection #3)
+            "type": "injection",
             "target_group": "frq",
             "start_pct": 0.30,
             "end_pct": 0.70,
             "params": {
-                "source_start_pct": 0.02,
-                "condition_type": "above",
-                "condition_val": 60.02
+                "type": "scale",
+                "value": 1.0008
             }
         },
         {
@@ -106,7 +106,7 @@ PRESET_SCENARIOS = {
         },
         {
             "id": "304",
-            "name": "Scenario 304 (ENF)",  # Microscopic Localized Sector Frequency Drift
+            "name": "Scenario 304 (ENF)",  # Microscopic Localized Sector Frequency Drift (Drift #2)
             "type": "drift",
             "target_group": "frq",
             "start_pct": 0.15,
@@ -115,7 +115,7 @@ PRESET_SCENARIOS = {
         },
         {
             "id": "305",
-            "name": "Scenario 305 (ENF)",  # Total System Replay (NLR Masking and Grid Desynchronization)
+            "name": "Scenario 305 (ENF)",  # Total System Replay (Replay #1)
             "type": "replay",
             "target_group": "all",
             "start_pct": 0.40,
@@ -278,8 +278,6 @@ def apply_replay_attack(data, start, end, total_rows, params, condition_type=Non
     if source_window_len <= 0:
         source_window_len = 1  
 
-    last_frq_val = None
-
     for i, row in enumerate(data):
         new_row = row.copy()
         is_attack = 0
@@ -293,15 +291,8 @@ def apply_replay_attack(data, start, end, total_rows, params, condition_type=Non
                             continue
                         if should_apply_modification(row[key], condition_type, condition_val):
                             is_attack = 1
-                            if key == "FRQ" and profiler is not None:
-                                # Synthesize continuous causal wave anchored to the LIVE incoming grid frame
-                                if last_frq_val is None:
-                                    last_frq_val = row["FRQ"]
-                                synthesized_frq = profiler.generate_tracked_step(row["FRQ"], last_frq_val)
-                                new_row["FRQ"] = synthesized_frq
-                                last_frq_val = synthesized_frq
-                            else:
-                                new_row[key] = source_row[key]
+                            # Direct historical telemetry replay for all target columns including FRQ
+                            new_row[key] = source_row[key]
         modified_data.append(new_row)
         attack_labels.append(is_attack)
     return modified_data, attack_labels
@@ -470,7 +461,7 @@ def main():
             tgt_map = {1: "frq", 2: "gpus", 3: "gpu_watts", 4: "gpu_temps", 5: "cpus", 6: "all"}
             target_group = tgt_map.get(tgt_choice, "all")
 
-            start_pct, end_pct = 0.01, 0.60
+            start_pct, end_pct = 0.10, 0.60
             
             if selected_mode == "extreme_shortcut":
                 attack_type = "injection"
@@ -575,7 +566,7 @@ def main():
         modified_data, attack_labels = apply_drift_attack(data, start_idx, end_idx, targets, run_params, c_type, c_val, profiler=profiler)
 
     # -----------------------------------------------------------------
-    # OUTPUT GENERATION (With Dynamic Precision Guard)
+    # OUTPUT GENERATION (Selective Precision Preservation)
     # -----------------------------------------------------------------
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_main = os.path.join(OUTPUT_DIR, f"attack_{output_id}.jsonl")
@@ -583,11 +574,24 @@ def main():
 
     print(f"\nWriting files to: '{OUTPUT_DIR}'...")
     with open(output_main, "w") as f_main, open(output_check, "w") as f_check:
-        for row, is_attack in zip(modified_data, attack_labels):
-            formatted_row = {
-                k: (v if k == "FRQ" else (round(v, 1) if "uJ" in k else round(v, 4))) if isinstance(v, float) else v 
-                for k, v in row.items()
-            }
+        for original_row, row, is_attack in zip(data, modified_data, attack_labels):
+            # Selective Precision Preservation:
+            # ONLY modify precision/round values that were explicitly modified as part of the attack.
+            # All other columns write with original unrounded float precision to avoid artificial noise.
+            formatted_row = {}
+            for k, v in row.items():
+                if isinstance(v, float):
+                    if k == "FRQ":
+                        # Preserve raw floating precision for frequency
+                        formatted_row[k] = v
+                    elif any(t == k or (t.endswith("_attack") and k.startswith(t[:-7])) for t in targets) and is_attack:
+                        # Only apply precision rounding to targets during active attack frames
+                        formatted_row[k] = round(v, 1) if "uJ" in k else round(v, 4)
+                    else:
+                        # Unmodified float: preserve exact representation from original dataset
+                        formatted_row[k] = original_row[k]
+                else:
+                    formatted_row[k] = v
             
             f_main.write(json.dumps(formatted_row) + "\n")
             
