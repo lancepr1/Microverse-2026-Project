@@ -25,7 +25,10 @@ STATUS OF EACH STAGE (2026-07):
                                    plain file (no ground truth) is ever
                                    fed to verification -- see
                                    stage_2_inject_attacks()'s docstring
-                                   for why that boundary matters.
+                                   for why that boundary matters. Now
+                                   also returns check_path (previously
+                                   discarded after internal use), since
+                                   stage 4 below needs it.
     Stage 3 (verify + fork):      REAL, tested, working. Verifies and
                                    writes directly to all three
                                    destinations in one pass -- no
@@ -34,46 +37,46 @@ STATUS OF EACH STAGE (2026-07):
                                    were always identical copies of it
                                    anyway. for_digital_twin.jsonl is
                                    genuinely consumed by Baron's
-                                   main_run.py (stage 5 below).
+                                   main_run.py (stage 6 below).
                                    for_dashboard.jsonl is consumed
                                    DIRECTLY by McCray's dashboard --
                                    data_feed.py reads its raw hostname
-                                   node-id columns as-is now (see the
-                                   removed Stage 4 note below), no
+                                   node-id columns as-is now, no
                                    normalization step exists anywhere in
-                                   this pipeline anymore.
-    REMOVED (2026-07, cleanup pass): there used to be a Stage 4 here that
-                                   normalized for_dashboard.jsonl's
-                                   node-id columns to a node00..nodeNN
-                                   format via McCray's
-                                   tools/normalize_node_ids.py (and,
-                                   before that, also ran a second
-                                   Verifier pass via
-                                   tools/generate_verification.py -- see
-                                   git history for that whole saga, not
-                                   repeated here). Both are gone: 
-                                   data_feed.py's node discovery now
-                                   reads real hostnames directly from
-                                   for_dashboard.jsonl (the same
-                                   gpu/cpu-column-based discovery
-                                   normalize_node_ids.py used to use, just
-                                   without a rename step after it), so
-                                   there is nothing left to normalize.
-                                   tools/normalize_node_ids.py,
-                                   tools/generate_verification.py, and
-                                   verification_feed.py have been deleted
-                                   from lanes/mccray_dashboard/ entirely --
-                                   not just marked obsolete anymore.
-    Stage 4 (launch dashboard):   Launches McCray's Dash app
+                                   this pipeline.
+    Stage 4 (evaluate detection): NEW (2026-07) -- a different thing
+                                   from the old, now-removed Stage 4 that
+                                   used to live at this number
+                                   (node-id normalization; see prior
+                                   git history, not repeated here). This
+                                   one runs scripts/metrics.py against
+                                   this run's own ground truth
+                                   (check_path, from stage 2) and
+                                   for_scoreboard.jsonl (from stage 3),
+                                   printing a precision/recall/F1/FPR/
+                                   time-to-detection report straight to
+                                   the console. This is now deliberately
+                                   the ONLY console output this pipeline
+                                   produces by default -- see VERBOSE
+                                   below, which silences every other
+                                   stage's routine narration so a run's
+                                   console output IS this evaluation
+                                   report, not buried under step-by-step
+                                   status. metrics.py's assumed location
+                                   (scripts/metrics.py) has not been
+                                   confirmed against the real repo layout
+                                   yet -- see stage_4_evaluate_detection()'s
+                                   own docstring.
+    Stage 5 (launch dashboard):   Launches McCray's Dash app
                                    (lanes/mccray_dashboard/dashboard/
                                    main.py) as a background process --
-                                   non-blocking, since stage 5 (Blender)
+                                   non-blocking, since stage 6 (Blender)
                                    blocks until the viewport window is
                                    closed and both need to run at once.
                                    Terminated in main()'s finally block
                                    when Blender exits, so it never
                                    orphans.
-    Stage 5 (launch digital twin): REAL. Launches Blender with
+    Stage 6 (launch digital twin): REAL. Launches Blender with
                                    main_run.py, which reads
                                    for_digital_twin.jsonl (just written
                                    by stage 3) and plays it back live,
@@ -125,6 +128,7 @@ at all (discover_nlr_pairs(folder, slurm_id=None)).
 
 import argparse
 import json
+import os
 import random
 import re
 import subprocess
@@ -423,7 +427,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
         pairs = [p for p in pairs if p[0] in args.node_ids]
         missing = set(args.node_ids) - {p[0] for p in pairs}
         if missing:
-            print(f"[1/5] WARNING: requested node IDs not found: {missing}")
+            vprint(f"[1/5] WARNING: requested node IDs not found: {missing}")
     elif args.node_count:
         pairs = sorted(pairs, key=lambda p: p[0])[:args.node_count]
 
@@ -457,7 +461,7 @@ def stage_1_ingest_and_smooth(args) -> Path:
     return out_path
 
 
-def stage_2_inject_attacks(clean_path: Path, args) -> Path:
+def stage_2_inject_attacks(clean_path: Path, args) -> tuple[Path, Path]:
     """
     Confirmed 2026-07 from reading attack.py's actual source:
 
@@ -489,11 +493,13 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     though our Verifier class happens to ignore unknown fields today
     (fragile to rely on that staying true). So this function returns
     BOTH paths as a tuple: (plain_path, check_path). Only plain_path
-    (found by stripping "_check" off the discovered check_path's name)
-    goes anywhere near stage_3/verification. check_path is carried
-    forward untouched, used only at the very end for scoring -- see
-    stage_4, which sends it to the scoreboard specifically and nowhere
-    else.
+    goes anywhere near stage_3/verification.
+
+    CHANGED (2026-07): check_path used to be discarded after being used
+    internally to locate plain_path -- now actually returned, since
+    stage_4 (metrics evaluation, new this week) needs it to find the
+    matching ground-truth file for scoring. Still never touches
+    verification itself -- stage_3 only ever receives plain_path.
     """
     import subprocess
     import time
@@ -516,9 +522,9 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
 
     node_count = args.actual_node_count
 
-    vprint(f"[2/5] Launching attack.py --nodes {node_count} "
+    vprint(f"[2/6] Launching attack.py --nodes {node_count} "
           f"(reads {clean_path}) ...")
-    vprint(f"[2/5] attack.py has its own interactive prompts -- answer those directly below.\n")
+    vprint(f"[2/6] attack.py has its own interactive prompts -- answer those directly below.\n")
     subprocess.run(
         ["python", "lanes/marchisano_attacks/attack.py", "--nodes", str(node_count)],
         check=True,
@@ -541,7 +547,7 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
             f"current behavior."
         )
     if len(new_files) > 1:
-        print(f"[2/5] WARNING: multiple files modified at once: "
+        vprint(f"[2/6] WARNING: multiple files modified at once: "
               f"{sorted(new_files)} -- using the most recently modified one, "
               f"but this ambiguity is worth understanding, not just working around.")
 
@@ -551,10 +557,9 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
     # column -- that would undermine the entire point of independent
     # verification. attack.py writes a PLAIN file alongside the _check
     # one (same scenario ID, no ground truth added) -- that's what
-    # gets fed into stage 3, not this _check file. check_path is only
-    # used here, internally, to reliably locate plain_path -- Ethan
-    # handles ground truth/scoring separately with his own copy of the
-    # _check file, so nothing downstream of this function needs it.
+    # gets fed into stage 3, not this _check file. check_path is
+    # carried forward (see CHANGED note above) purely for stage 4's
+    # scoring use -- nothing else downstream of stage 2 touches it.
     plain_path = check_path.parent / check_path.name.replace("_check.jsonl", ".jsonl")
     if not plain_path.exists():
         raise FileNotFoundError(
@@ -565,8 +570,8 @@ def stage_2_inject_attacks(clean_path: Path, args) -> Path:
             f"verifier actually processes."
         )
 
-    vprint(f"[2/5] attack.py finished -> {plain_path} (fed to verifier)")
-    return plain_path
+    vprint(f"[2/6] attack.py finished -> {plain_path} (fed to verifier)")
+    return plain_path, check_path
 
 
 def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
@@ -614,7 +619,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
     from anchor import AnchorExtractor
     from verification import Verifier
 
-    vprint(f"[3/5] Verifying {attacked_path} ...")
+    vprint(f"[3/6] Verifying {attacked_path} ...")
     records = list(read_combined_jsonl(str(attacked_path)))
     enf_list = [r["FRQ"] for r in records]
     extractor = AnchorExtractor(enf=enf_list, sample_rate_hz=0.5)
@@ -646,7 +651,7 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         (k.split("_gpu")[0] if "_gpu" in k else k.split("_cpu")[0])
         for k in sample_keys if "_gpu" in k or "_cpu" in k
     })
-    vprint(f"[3/5] {len(node_ids)} node column(s): {node_ids}")
+    vprint(f"[3/6] {len(node_ids)} node column(s): {node_ids}")
 
     out_dir = _REPO_ROOT / "lanes" / "leiva_verification" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -690,12 +695,71 @@ def stage_3_verify_and_fork(attacked_path: Path, args) -> None:
         for fh in handles.values():
             fh.close()
 
-    vprint(f"[3/5] Wrote {len(records)} verified records to 3 destinations:")
+    vprint(f"[3/6] Wrote {len(records)} verified records to 3 destinations:")
     for name, dest in destinations.items():
         vprint(f"       {name:14s} -> {dest}")
 
 
-def stage_4_launch_dashboard():
+def stage_4_evaluate_detection(check_path: Path, args) -> None:
+    """
+    NEW (2026-07). Runs the scoring/evaluation tool against this run's
+    own ground-truth file (check_path, from stage 2) and
+    for_scoreboard.jsonl (just written by stage 3), letting its
+    multi-layer precision/recall/F1/FPR/time-to-detection report print
+    straight to the console. This is now deliberately the ONLY thing
+    this pipeline prints to the console by default -- see VERBOSE at
+    the top of this file, which now gates every other stage's routine
+    narration. The intent: a run's console output should BE this
+    evaluation report, not routine step-by-step status buried around
+    it.
+
+    CONFIRMED LOCATION (2026-07): microverse_core/metrics.py -- fixes an
+    earlier wrong guess (scripts/metrics.py, which doesn't exist; the
+    stage silently found nothing and skipped, and its own "not found"
+    warning was mistakenly gated behind vprint too, so a real run could
+    finish with zero indication the report never ran at all). Lines up
+    with microverse_core/__init__.py's own docstring, which already
+    listed "the scoring metrics" among what that package owns --
+    should have been the first place checked. The not-found warning
+    below is now a plain, always-visible print(), not vprint() -- a
+    missing evaluation report is exactly the kind of thing that must
+    never fail silently, unlike the routine step narration VERBOSE
+    gates everywhere else in this file.
+
+    Scenario ID is derived directly from check_path's own filename
+    (e.g. "attack_304_check.jsonl" -> "304",
+    "attack_easy_2_check.jsonl" -> "easy_2") -- exactly the format
+    metrics.py's own resolve_project_paths() already expects (its own
+    docstring gives "304" or "easy_1" as examples), so this reuses
+    metadata attack.py already encoded in the filename rather than
+    re-deriving or guessing scenario identity a second time.
+
+    Deliberately does NOT use check=True / propagate a failure here --
+    a missing or malformed scoreboard file failing evaluation shouldn't
+    block the dashboard or digital twin from still launching after it;
+    those are independent concerns from scoring. metrics.py's own
+    main() already prints a clear error and exits non-zero on a real
+    problem (missing files, row-count mismatch, index misalignment) --
+    that output is not suppressed, so a failure here is still visible,
+    just not fatal to the rest of the run.
+    """
+    _METRICS_SCRIPT = _REPO_ROOT / "microverse_core" / "metrics.py"
+
+    scenario_id = check_path.name.removeprefix("attack_").removesuffix("_check.jsonl")
+
+    if not _METRICS_SCRIPT.exists():
+        print(f"[4/6] WARNING: metrics.py not found at {_METRICS_SCRIPT} -- "
+              f"skipping the evaluation report. If it's been moved, update "
+              f"_METRICS_SCRIPT's location in stage_4_evaluate_detection().")
+        return
+
+    subprocess.run(
+        [sys.executable, str(_METRICS_SCRIPT), "--id", scenario_id],
+        cwd=str(_REPO_ROOT),
+    )
+
+
+def stage_5_launch_dashboard():
     """
     Launches McCray's Dash app (lanes/mccray_dashboard/dashboard/main.py)
     as a background process -- non-blocking, via Popen rather than run(),
@@ -733,7 +797,7 @@ def stage_4_launch_dashboard():
     """
     DASHBOARD_STARTUP_GRACE_S = 1.5
 
-    vprint(f"[4/5] Launching dashboard (lanes/mccray_dashboard/dashboard/main.py) ...")
+    vprint(f"[5/6] Launching dashboard (lanes/mccray_dashboard/dashboard/main.py) ...")
     process = subprocess.Popen(
         [sys.executable, "main.py"],
         cwd=str(_DASHBOARD_DIR),
@@ -742,7 +806,7 @@ def stage_4_launch_dashboard():
     time.sleep(DASHBOARD_STARTUP_GRACE_S)
     if process.poll() is not None:
         raise RuntimeError(
-            f"[4/5] Dashboard process exited immediately (code "
+            f"[5/6] Dashboard process exited immediately (code "
             f"{process.returncode}) -- see the traceback printed above "
             f"for the real cause. Two common ones: (1) dashboard "
             f"dependencies aren't installed in this environment -- "
@@ -752,13 +816,64 @@ def stage_4_launch_dashboard():
             f"`pkill -9 -f main.py` first, then re-run."
         )
 
-    vprint(f"[4/5] Dashboard launched (pid={process.pid}) -- see main.py's own "
+    vprint(f"[5/6] Dashboard launched (pid={process.pid}) -- see main.py's own "
           f"app.run() call for the port (Dash defaults to 127.0.0.1:8050 "
           f"unless that's been changed).")
     return process
 
 
-def stage_5_launch_digital_twin() -> None:
+def _resolve_blend_file() -> Path:
+    """
+    Scans data/rawdata/ for a .blend file, prompting if more than one
+    exists. MOVED here (2026-07) from main_run.py's own
+    _find_blend_file() -- necessary once stage_6 below started piping
+    and filtering Blender's stdout in real time to strip out its
+    per-tick render engine noise (see that function's own comment for
+    why). input()'s prompt text has no trailing newline, so a
+    line-buffered read loop over a piped stdout would never flush it
+    to the terminal -- Blender would sit there waiting for a response
+    to a question you can't see, a silent deadlock, not a hypothetical
+    risk. Resolving the choice HERE, in this process's own normal
+    terminal (never piped), and handing the result to Blender via
+    MICROVERSE_BLEND_FILE (main_run.py already checks this env var
+    first, before its own scan) means main_run.py never needs
+    interactive input through that pipe at all. main_run.py's own
+    _find_blend_file() is left in place as a fallback for anyone
+    running `blender --python main_run.py` directly, standalone,
+    outside this pipeline -- just never reached when launched from
+    here.
+    """
+    blend_dir = _REPO_ROOT / "data" / "rawdata"
+    if not blend_dir.is_dir():
+        raise RuntimeError(
+            f"Expected {blend_dir} to exist -- see README.md's "
+            f"\"Where to put your data\" section. Put your .blend file "
+            f"directly inside data/rawdata/ at the repo root."
+        )
+
+    blend_files = sorted(f for f in blend_dir.iterdir() if f.suffix.lower() == ".blend")
+
+    if not blend_files:
+        raise RuntimeError(
+            f"No .blend file found in {blend_dir}. See README.md's "
+            f"\"Where to put your data\" section -- put your .blend "
+            f"file directly inside data/rawdata/ at the repo root."
+        )
+
+    if len(blend_files) == 1:
+        return blend_files[0]
+
+    print(f"\nMultiple .blend files found in {blend_dir}:")
+    for i, f in enumerate(blend_files, 1):
+        print(f"  {i}. {f.name}")
+    while True:
+        raw = input(f"Which one? [1-{len(blend_files)}]: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(blend_files):
+            return blend_files[int(raw) - 1]
+        print("  Invalid choice, try again.")
+
+
+def stage_6_launch_digital_twin() -> None:
     """
     Launches Blender with main_run.py (repo root -- Baron's
     lane), which reads for_digital_twin.jsonl (just written by stage 3)
@@ -770,45 +885,80 @@ def stage_5_launch_digital_twin() -> None:
     the entire point of watching the twin update live. Runs with a
     normal, visible Blender window instead.
 
-    CHANGED (2026-07): main_run.py's .blend file handling is NOT an
-    interactive prompt that remembers the last path (that description
-    was stale relative to main_run.py's actual code) -- it auto-scans
-    data/rawdata/ (repo-relative, same convention as gather_inputs()'s
-    dataset/ENF discovery above) for a .blend file, auto-selecting if
-    exactly one is found. Only asks a real question (which one?) if
-    multiple .blend files are actually present there; fails with a
-    clear, actionable message if none are. MICROVERSE_BLEND_FILE, if
-    set, skips the scan entirely -- useful for non-interactive/automated
-    runs. Still inherits this process's stdin/stdout, same as attack.py's
-    prompts in stage_2, for the rare multi-file disambiguation case.
+    CHANGED (2026-07): .blend file selection now happens HERE, before
+    Blender is even launched, via _resolve_blend_file() above -- see
+    its own docstring for why. The result is passed through
+    MICROVERSE_BLEND_FILE so main_run.py's own scan is skipped
+    entirely.
 
-    Still a BLOCKING call (subprocess.run, not Popen) -- this is
-    deliberately the last thing main() does, so the pipeline "finishes"
-    exactly when the person closes the Blender window, matching how it
-    behaved before the dashboard was added.
+    CHANGED AGAIN (2026-07): switched from subprocess.run (inherits
+    stdout directly) to Popen with a real-time line filter. Blender's
+    own internal render engine logs two lines on EVERY viewport capture
+    tick ("Saved: '...'" / "OpenGL Render written to '...'") --
+    completely independent of anything in main_run.py's own print
+    statements (already gated behind that file's own VERBOSE flag --
+    this is a SEPARATE noise source, Blender's engine itself, not our
+    code, and could never have been silenced by fixing our own print()
+    calls). Filtered here line-by-line rather than redirecting stdout
+    to DEVNULL entirely, since that blunt approach would also swallow
+    genuine Blender errors/tracebacks along with the noise -- everything
+    else still passes through live, unfiltered, the moment each line
+    arrives. Bypassed (shows everything, unfiltered) when VERBOSE=True,
+    same override every other stage in this file already respects.
+
+    Still fundamentally a BLOCKING step -- process.wait() below still
+    holds this function open until Blender's window is closed, exactly
+    like the old subprocess.run(check=True) did, so the pipeline still
+    "finishes" exactly when the person closes the Blender window.
     """
-    vprint(f"[5/5] Launching Blender with the digital twin ...")
-    subprocess.run(
-        ["blender", "--python", "main_run.py"],
-        check=True,
+    vprint(f"[6/6] Launching Blender with the digital twin ...")
+
+    blend_path = os.environ.get("MICROVERSE_BLEND_FILE")
+    if not blend_path:
+        blend_path = str(_resolve_blend_file())
+
+    env = os.environ.copy()
+    env["MICROVERSE_BLEND_FILE"] = blend_path
+
+    _BLENDER_NOISE_PATTERNS = ("Saved: '", "OpenGL Render written to")
+    command = ["blender", "--python", "main_run.py"]
+
+    process = subprocess.Popen(
+        command,
         cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
+
+    for line in process.stdout:
+        stripped = line.rstrip("\n")
+        if not VERBOSE and any(p in stripped for p in _BLENDER_NOISE_PATTERNS):
+            continue
+        print(stripped, flush=True)
+
+    process.wait()
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command)
 
 
 def main():
     args = gather_inputs()
     clean_path = stage_1_ingest_and_smooth(args)
-    attacked_path = stage_2_inject_attacks(clean_path, args)
+    attacked_path, check_path = stage_2_inject_attacks(clean_path, args)
     stage_3_verify_and_fork(attacked_path, args)
+    stage_4_evaluate_detection(check_path, args)
 
-    dashboard_process = stage_4_launch_dashboard()
+    dashboard_process = stage_5_launch_dashboard()
     try:
-        stage_5_launch_digital_twin()
+        stage_6_launch_digital_twin()
     finally:
         # Blender closed (or crashed/raised) -- don't leave the dashboard
         # server running as an orphaned background process either way.
         if dashboard_process.poll() is None:
-            print("[5/5] Blender exited -- stopping the dashboard process ...")
+            vprint("[6/6] Blender exited -- stopping the dashboard process ...")
             dashboard_process.terminate()
             try:
                 dashboard_process.wait(timeout=5)

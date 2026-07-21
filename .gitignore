@@ -21,12 +21,6 @@ lanes/marchisano_attacks/outputs/
 lanes/mccray_dashboard/dashboard/*.db
 
 # datasets never go in git (see data/README.md)
-# CHANGED: was data/nlr/ + data/enf/ -- doesn't match the current data
-# layout, scripts/run_microverse.py and main_run.py now both read from
-# data/rawdata/ (00_raw_datasets/, "ENF-ML (CNN+MAMBA)"/, and the
-# .blend file all live there together). Left the old two lines out
-# entirely rather than keeping them alongside the new one -- they don't
-# match anything real anymore and would just be confusing dead entries.
 data/rawdata/
 *.csv
 *.parquet

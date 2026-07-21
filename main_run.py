@@ -5,6 +5,23 @@ import importlib
 import tempfile
 import bpy
 
+# CHANGED (2026-07): matches the same VERBOSE/vprint convention added to
+# scripts/run_microverse.py -- the per-frame "Grid: X Hz | ..." line
+# below printed on every single simulation tick (every 2 seconds),
+# which is exactly the kind of routine narration that's redundant now
+# that the dashboard and digital twin show the same information live.
+# Default off. Real warnings (missing scene objects, per-frame write
+# failures) and the interactive .blend-file disambiguation prompt are
+# deliberately NOT gated -- those indicate a real problem or are the
+# actual interactive UI, not routine status.
+VERBOSE = False
+
+
+def vprint(*args, **kwargs) -> None:
+    if VERBOSE:
+        print(*args, **kwargs)
+
+
 # ==========================================================================
 # 📂 REPOSITORY PATH ALIGNMENT
 # ==========================================================================
@@ -60,7 +77,7 @@ def _find_blend_file():
 
     if len(blend_files) == 1:
         chosen = blend_files[0]
-        print(f"🔎 Found .blend file: {chosen}")
+        vprint(f"🔎 Found .blend file: {chosen}")
     else:
         print(f"\nMultiple .blend files found in {projects_dir}:")
         for i, f in enumerate(blend_files, 1):
@@ -86,7 +103,7 @@ TARGET_BLEND_FILE = os.environ.get("MICROVERSE_BLEND_FILE") or _find_blend_file(
 # If the runner launches a default blank project, dynamically open your file
 if bpy.data.filepath != TARGET_BLEND_FILE:
     if os.path.exists(TARGET_BLEND_FILE):
-        print(f"🔄 Hot-loading target twin project: {TARGET_BLEND_FILE}")
+        vprint(f"🔄 Hot-loading target twin project: {TARGET_BLEND_FILE}")
         bpy.ops.wm.open_mainfile(filepath=TARGET_BLEND_FILE)
     else:
         raise FileNotFoundError(
@@ -151,8 +168,8 @@ class RealTimeSimulationRunner:
         self.step = 0
         self.file_handle = None
 
-        print(f"\n🚀 Connecting Ingestion Engine to Pre-Existing Scene for Run: {run_id}")
-        print(f"📂 Source Data Path: {self.file_path}")
+        vprint(f"\n🚀 Connecting Ingestion Engine to Pre-Existing Scene for Run: {run_id}")
+        vprint(f"📂 Source Data Path: {self.file_path}")
 
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"Critical Error: Missing data file at {self.file_path}")
@@ -174,7 +191,7 @@ class RealTimeSimulationRunner:
             for k in first_record.keys()
             if "_gpu" in k or "_cpu" in k
         })
-        print(f"🔎 Discovered {len(self.nodes)} node(s) from data: {self.nodes}")
+        vprint(f"🔎 Discovered {len(self.nodes)} node(s) from data: {self.nodes}")
         # Rewind so process_next_line() sees this same first record again --
         # discovery shouldn't consume a real simulation step.
         self.file_handle.seek(0)
@@ -206,7 +223,7 @@ class RealTimeSimulationRunner:
             print(f"⚠️ WARNING: The following objects were not found in your scene tree: {missing_components}")
             print(f"⚠️ This usually means the scene doesn't yet have objects for every node this run's data actually contains -- add them, or this run's node count/IDs won't fully display.")
         else:
-            print("✨ Success! All hardware components matched your workspace tree layout perfectly.")
+            vprint("✨ Success! All hardware components matched your workspace tree layout perfectly.")
 
 
     def process_next_line(self):
@@ -216,7 +233,7 @@ class RealTimeSimulationRunner:
             
         line = self.file_handle.readline()
         if not line or not line.strip():
-            print(f"✅ Real-time asset stream complete. Reached end of file.")
+            vprint(f"✅ Real-time asset stream complete. Reached end of file.")
             self.file_handle.close()
             return None
             
@@ -309,7 +326,7 @@ class RealTimeSimulationRunner:
         # --- 4. EXPORT SNAPSHOTS TO RUNS DIRECTORY ---
         io_records.write_records(self.run_id, "power", frame_records)
 
-        print(f"⏰ [Line Entry {data.get('index')}] Grid: {freq_val:.4f} Hz | {' | '.join(status_summary)}")
+        vprint(f"⏰ [Line Entry {data.get('index')}] Grid: {freq_val:.4f} Hz | {' | '.join(status_summary)}")
         if write_failures:
             print(f"   ⚠️ {len(write_failures)} object write(s) failed (not in scene): {sorted(set(write_failures))}")
         
