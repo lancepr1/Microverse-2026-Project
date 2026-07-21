@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import os
+import csv
 import json
 import sys
 import argparse
+import datetime
 
 # =====================================================================
 # STATIC PATH RESOLUTION MECHANICS
@@ -43,6 +45,30 @@ def resolve_project_paths(scenario_id):
     detector_file = os.path.join(verification_dir, "for_scoreboard.jsonl")
 
     return truth_file, detector_file
+
+
+def _resolve_root_dir():
+    """
+    Same walk-up logic as resolve_project_paths() above, factored out
+    so append_to_history_csv() below can find runs/ without needing a
+    scenario_id. Kept as a near-duplicate rather than a shared refactor
+    of resolve_project_paths() itself, to avoid touching that function's
+    existing, already-working behavior for this additive change.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    current = script_dir
+    root_dir = None
+    while current:
+        if os.path.isdir(os.path.join(current, "lanes")):
+            root_dir = current
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if not root_dir:
+        root_dir = os.path.normpath(os.path.join(script_dir, "../.."))
+    return root_dir
 
 # =====================================================================
 # MATHEMATICAL EVALUATION ENGINE
@@ -122,6 +148,103 @@ def calculate_time_to_detection(truth_list, pred_list):
             })
 
     return window_results
+
+# =====================================================================
+# PERSISTENT HISTORY LOGGING -- ADDED 2026-07
+# =====================================================================
+def append_to_history_csv(scenario_id, difficulty, truth_file, detector_file, results_by_layer):
+    """
+    Appends one row per evaluated layer (Global/System, plus one per
+    node and per physical channel found) to runs/detection_history.csv,
+    building a persistent, structured record of every evaluation run
+    across however many attacks get run this week. Purely additive --
+    does not change anything about the console report
+    print_evaluation_dashboard() already produces; that still runs
+    exactly as before, every time.
+
+    difficulty is BEST-EFFORT ONLY, not fully reliable -- worth
+    understanding precisely before trusting the resulting chart's
+    easy/medium/hard buckets:
+      - "easy" is reliably auto-detected, since Easy mode's own
+        deterministic filenames self-label it (e.g. "attack_easy_2"
+        contains "easy" directly in the scenario id attack.py itself
+        produces).
+      - Medium and Hard BOTH produce unprefixed randomized numeric IDs
+        (e.g. "attack_304") with nothing in the filename or the ID
+        itself distinguishing which tier a given run came from --
+        confirmed nothing in this repo currently records that
+        distinction anywhere both attack.py and this script can read.
+        Logged as "unknown" unless explicitly passed via --difficulty.
+      - When this script is invoked automatically by
+        scripts/run_microverse.py's stage_4, there is no --difficulty
+        passed at all today, since run_microverse.py itself has no way
+        to know which tier was chosen inside attack.py's own
+        interactive prompts. Medium/Hard runs driven through the full
+        pipeline will show up as "unknown" in the history file unless
+        this gets fixed properly later (e.g. attack.py recording its
+        own difficulty choice somewhere both scripts can read) or
+        someone manually re-runs this script standalone afterward with
+        --difficulty set correctly for that scenario id.
+    """
+    root_dir = _resolve_root_dir()
+    history_dir = os.path.join(root_dir, "runs")
+    os.makedirs(history_dir, exist_ok=True)
+    history_path = os.path.join(history_dir, "detection_history.csv")
+
+    file_exists = os.path.exists(history_path)
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+
+    fieldnames = [
+        "timestamp", "scenario_id", "difficulty", "layer",
+        "strict_tp", "strict_fp", "strict_tn", "strict_fn",
+        "strict_precision", "strict_recall", "strict_f1", "strict_fpr",
+        "lenient_tp", "lenient_fp", "lenient_tn", "lenient_fn",
+        "lenient_precision", "lenient_recall", "lenient_f1", "lenient_fpr",
+        "strict_avg_ttd", "lenient_avg_ttd",
+        "truth_file", "detector_file",
+    ]
+
+    with open(history_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+
+        for layer_name, data in results_by_layer.items():
+            strict_m = data["strict_m"]
+            lenient_m = data["lenient_m"]
+            strict_ttd = data["strict_ttd"]
+            lenient_ttd = data["lenient_ttd"]
+
+            s_valid = [x["ttd"] for x in strict_ttd if isinstance(x["ttd"], int)]
+            l_valid = [x["ttd"] for x in lenient_ttd if isinstance(x["ttd"], int)]
+            strict_avg_ttd = round(sum(s_valid) / len(s_valid), 3) if s_valid else ""
+            lenient_avg_ttd = round(sum(l_valid) / len(l_valid), 3) if l_valid else ""
+
+            writer.writerow({
+                "timestamp": timestamp,
+                "scenario_id": scenario_id,
+                "difficulty": difficulty,
+                "layer": layer_name,
+                "strict_tp": strict_m["tp"], "strict_fp": strict_m["fp"],
+                "strict_tn": strict_m["tn"], "strict_fn": strict_m["fn"],
+                "strict_precision": round(strict_m["precision"], 6),
+                "strict_recall": round(strict_m["recall"], 6),
+                "strict_f1": round(strict_m["f1"], 6),
+                "strict_fpr": round(strict_m["fpr"], 6),
+                "lenient_tp": lenient_m["tp"], "lenient_fp": lenient_m["fp"],
+                "lenient_tn": lenient_m["tn"], "lenient_fn": lenient_m["fn"],
+                "lenient_precision": round(lenient_m["precision"], 6),
+                "lenient_recall": round(lenient_m["recall"], 6),
+                "lenient_f1": round(lenient_m["f1"], 6),
+                "lenient_fpr": round(lenient_m["fpr"], 6),
+                "strict_avg_ttd": strict_avg_ttd,
+                "lenient_avg_ttd": lenient_avg_ttd,
+                "truth_file": os.path.basename(truth_file),
+                "detector_file": os.path.basename(detector_file),
+            })
+
+    print(f"\n📊 Logged {len(results_by_layer)} layer(s) to {history_path} "
+          f"(difficulty recorded as: {difficulty})")
 
 # =====================================================================
 # DASHBOARD RENDERING LAYOUT
@@ -205,6 +328,17 @@ def main():
         "--id", 
         required=True, 
         help="Specify the target Scenario Evaluation ID (e.g., '304' or 'easy_1')"
+    )
+    parser.add_argument(
+        "--difficulty",
+        default=None,
+        choices=["easy", "medium", "hard"],
+        help="Optional. Recorded in runs/detection_history.csv for this run. "
+             "Auto-detected as 'easy' when the scenario id itself indicates "
+             "Easy mode -- Medium and Hard cannot be told apart automatically "
+             "(see append_to_history_csv()'s docstring), so pass this "
+             "explicitly for those if you want the history log to reflect "
+             "it correctly."
     )
     args = parser.parse_args()
 
@@ -323,6 +457,14 @@ def main():
     print_evaluation_dashboard(
         args.id, truth_path, detector_path, results_by_layer
     )
+
+    # ADDED 2026-07: persist this run's results for later cross-run
+    # analysis -- see append_to_history_csv()'s own docstring for the
+    # difficulty-tier auto-detection caveat.
+    difficulty = args.difficulty
+    if difficulty is None:
+        difficulty = "easy" if "easy" in args.id.lower() else "unknown"
+    append_to_history_csv(args.id, difficulty, truth_path, detector_path, results_by_layer)
 
 if __name__ == "__main__":
     main()
