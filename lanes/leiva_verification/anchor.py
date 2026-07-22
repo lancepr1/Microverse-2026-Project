@@ -1,21 +1,8 @@
-"""
-anchor.py
----------
-AnchorExtractor: builds one AnchorRecord per time step from an ENF stream.
+"""Physical-signal anchor extraction from Electric Network Frequency data.
 
-Replaces fake_anchor in scripts/smoke_test.py.
-
-The AnchorRecord produced here carries three things per the task spec:
-  timestamp  : elapsed seconds matching the PowerSample being processed
-  signature  : normalized ENF window -- the shape fingerprint
-  confidence : Pearson correlation with the previous window -- smoothness
-               metric that the Verifier uses to detect discontinuities
-
-Why this works as a verification anchor:
-  Real ENF follows a slow random walk with a restoring force toward 60 Hz.
-  Consecutive windows of honest ENF are highly correlated (above 0.85).
-  A replayed or fabricated window will not share the same random walk
-  history, causing confidence to drop sharply. The Verifier catches this.
+Provides AnchorExtractor, which converts a raw ENF time series into
+AnchorRecord objects carrying a normalized signature and a confidence
+score, consumed by the verification pipeline.
 """
 
 from __future__ import annotations
@@ -28,39 +15,21 @@ from microverse_core.contracts import AnchorRecord, AnchorType
 
 
 class AnchorExtractor:
-    """
-    Reads an ENF list and produces one AnchorRecord per call to extract().
+    """Extracts one AnchorRecord per timestamp from an ENF time series.
 
-    Parameters
-    ----------
-    enf : list[float]
-        Full ENF time series from data_loaders.load_enf().
-        1800 floats for the real AFRL dataset (1 hour at 0.5 Hz).
-    sample_rate_hz : float
-        ENF samples per second. Real dataset: 0.5 Hz.
-        Synthetic fallback: whatever hz was passed to synthetic_enf().
-    window_radius : int
-        Samples on each side of the centre index.
-        Default 5 gives 11 samples = 22 seconds at 0.5 Hz.
-        Tune after inspecting real data.
-    source : str
-        Embedded in AnchorRecord.source for traceability.
+    Args:
+        enf: Full ENF time series, one value per sample (e.g. 1800
+            floats for a 1-hour recording at 0.5 Hz).
+        sample_rate_hz: Samples per second in `enf`.
+        window_radius: Number of samples on each side of the center
+            index to include in each extracted window.
+        source: Value stored in ``AnchorRecord.source``.
+
+    Raises:
+        ValueError: If `enf` is empty, `sample_rate_hz` is not
+            positive, or `window_radius` is less than 1.
     """
 
-    # RETUNED (2026-07) from 5 to 9. Tested a full sweep 5-170 against both
-    # a known-smooth synthetic reference and the cleanest verified real ENF
-    # segment available: widening the window reduces small-sample
-    # correlation noise (real gains on both signals), but ALSO makes a
-    # sustained constant-value attack progressively harder to detect, since
-    # a long enough anomaly becomes self-correlated with its own
-    # window-shifted copy. Found a sharp cliff: confidence during a tested
-    # 20-sample sustained attack stayed at exactly 0.0 (fully caught) for
-    # radius 5-9, then jumped to 0.62+ at radius=11 (effectively blind).
-    # 9 is the widest value with ZERO measured cost against that attack.
-    # CAVEAT: this safety margin is tied to that attack's specific 20-sample
-    # duration (window size stays just under attack length). NOT verified
-    # safe against a shorter sustained attack -- re-test if one becomes
-    # available.
     DEFAULT_WINDOW_RADIUS = 9
     DEFAULT_SOURCE = "enf_dataset"
 
@@ -86,14 +55,14 @@ class AnchorExtractor:
         self._source = source
         self._prev_window: Optional[list[float]] = None
 
-    # --- getters/setters -------------------------------------------------------
-
     @property
     def sample_rate_hz(self) -> float:
+        """float: Samples per second in the underlying ENF series."""
         return self._sample_rate_hz
 
     @property
     def window_radius(self) -> int:
+        """int: Samples on each side of the center index per window."""
         return self._window_radius
 
     @window_radius.setter
@@ -104,24 +73,19 @@ class AnchorExtractor:
 
     @property
     def enf_length(self) -> int:
+        """int: Total number of samples in the underlying ENF series."""
         return len(self._enf)
 
-    # --- public API ------------------------------------------------------------
-
     def extract(self, timestamp: float) -> AnchorRecord:
-        """
-        Build one AnchorRecord for the given elapsed timestamp.
+        """Builds one AnchorRecord for the given elapsed timestamp.
 
-        Parameters
-        ----------
-        timestamp : float
-            Elapsed seconds from start of run.
-            Must match the timestamp on the PowerSample being verified.
+        Args:
+            timestamp: Elapsed seconds from the start of the run. Must
+                match the timestamp on the record being verified.
 
-        Returns
-        -------
-        AnchorRecord
-            All fields match microverse_core.contracts exactly.
+        Returns:
+            AnchorRecord: Normalized signature and confidence score
+            for the window centered on `timestamp`.
         """
         window = self._slice_window(timestamp)
         normalized = self._normalize(window)
@@ -137,26 +101,28 @@ class AnchorExtractor:
             source=self._source,
         )
 
-    # --- private helpers -------------------------------------------------------
-
     def _timestamp_to_index(self, timestamp: float) -> int:
-        """
-        Convert elapsed seconds to ENF list index.
+        """Converts elapsed seconds to an ENF list index, clamped to range.
 
-        At 0.5 Hz: t=0.0 -> index 0
-                   t=2.0 -> index 1
-                   t=10.0 -> index 5
+        Args:
+            timestamp: Elapsed seconds from the start of the run.
 
-        Clamps to valid range so edge timestamps never crash.
+        Returns:
+            int: Index into the ENF list, clamped to [0, len(enf) - 1].
         """
         idx = int(timestamp * self._sample_rate_hz)
         return max(0, min(idx, len(self._enf) - 1))
 
     def _slice_window(self, timestamp: float) -> list[float]:
-        """
-        Extract a fixed-size window of ENF values centred on timestamp.
-        Pads by repeating the nearest edge value when the window extends
-        beyond the list boundaries so every window is the same length.
+        """Extracts a fixed-size ENF window centered on `timestamp`.
+
+        Args:
+            timestamp: Elapsed seconds from the start of the run.
+
+        Returns:
+            list[float]: Window of length ``2 * window_radius + 1``,
+            padded by repeating the nearest edge value where the
+            window extends past the list boundaries.
         """
         centre = self._timestamp_to_index(timestamp)
         lo = centre - self._window_radius
@@ -170,14 +136,14 @@ class AnchorExtractor:
         return window
 
     def _normalize(self, window: list[float]) -> list[float]:
-        """
-        Min-max normalize the window to [0, 1].
+        """Min-max normalizes a window to [0, 1].
 
-        Makes the signature represent the shape of the ENF fluctuation
-        rather than its absolute level. A replay or fabricated window
-        may have a similar mean but will not share the same shape.
+        Args:
+            window: Raw ENF values.
 
-        A flat window returns all 0.5s and gets flagged by ENFRangeCheck.
+        Returns:
+            list[float]: Normalized values. A flat input window
+            returns all 0.5s.
         """
         lo = min(window)
         hi = max(window)
@@ -187,12 +153,14 @@ class AnchorExtractor:
         return [(v - lo) / span for v in window]
 
     def _compute_confidence(self, current: list[float]) -> float:
-        """
-        Pearson correlation between the current normalized window and
-        the previous one. Returns 1.0 on the first call.
+        """Computes Pearson correlation against the previous window.
 
-        High confidence means ENF is evolving smoothly as expected for
-        a real power grid. A sudden drop signals tampering.
+        Args:
+            current: Normalized ENF window for the current call.
+
+        Returns:
+            float: Correlation in [-1, 1], or 1.0 on the first call
+            (no previous window to compare against).
         """
         if self._prev_window is None:
             return 1.0
@@ -200,9 +168,17 @@ class AnchorExtractor:
 
 
 def _pearson(a: list[float], b: list[float]) -> float:
-    """
-    Pearson correlation coefficient. Standard library only, no numpy.
-    Returns 0.0 if variance is zero. Clamps result to [-1, 1].
+    """Computes the Pearson correlation coefficient of two sequences.
+
+    Standard library only, no numpy dependency.
+
+    Args:
+        a: First sequence.
+        b: Second sequence.
+
+    Returns:
+        float: Correlation in [-1, 1]. Returns 0.0 if either input
+        has zero variance, or 1.0 if fewer than 2 samples overlap.
     """
     n = min(len(a), len(b))
     if n < 2:

@@ -53,7 +53,7 @@ PRESET_SCENARIOS = {
             "target_group": "frq",
             "start_pct": 0.40,
             "end_pct": 0.80,
-            "params": {"type": "bias", "value": 0.05}
+            "params": {"type": "bias", "value": 0.5}
         },
         {
             "id": "205",
@@ -65,7 +65,7 @@ PRESET_SCENARIOS = {
             "params": {
                 "type": "bias", 
                 "value": -0.2,
-                "jitter": 0.002
+                "jitter": 0.2
             }
         }
     ],
