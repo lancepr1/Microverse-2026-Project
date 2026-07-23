@@ -1,17 +1,11 @@
-"""
-io_records.py: a dead-simple file bus for the contract records.
+"""A simple file-based message bus for the contract records.
 
-Week three is when components start talking. Rather than stand up a live
-service on day one, each lane appends its records to a JSONL file under runs/
-and reads the files it depends on. It is boring, debuggable, and gives every
-run a permanent artifact you can replay. Move to something fancier only if a
-real need shows up.
-
-    runs/<run_id>/power.jsonl          PowerSample      (loaders)
-    runs/<run_id>/anchors.jsonl        AnchorRecord     (Leiva)
-    runs/<run_id>/verification.jsonl   VerificationResult (Leiva)
-    runs/<run_id>/attacks.jsonl        AttackEvent      (Marchisano)
+Each lane appends its records to a JSONL file under `runs/<run_id>/`
+and reads the files it depends on. Every run produces a durable,
+replayable artifact rather than requiring a live service. See
+.readme/io_records.md for the file layout and design rationale.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,14 +20,32 @@ RUNS_DIR = os.environ.get("MICROVERSE_RUNS", "runs")
 
 
 def _path(run_id: str, name: str) -> str:
+    """Builds (and ensures the existence of) the path for one record file.
+
+    Args:
+        run_id: Identifier for this run.
+        name: Record stream name, e.g. "anchors".
+
+    Returns:
+        str: Path to runs/<run_id>/<name>.jsonl.
+    """
     d = os.path.join(RUNS_DIR, run_id)
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"{name}.jsonl")
 
 
 def write_records(run_id: str, name: str, records: Iterable[_Record]) -> str:
-    """Append records to runs/<run_id>/<name>.jsonl. Each line is one record,
-    tagged with its type so the reader can reconstruct it."""
+    """Appends records to runs/<run_id>/<name>.jsonl.
+
+    Args:
+        run_id: Identifier for this run.
+        name: Record stream name, e.g. "anchors".
+        records: Records to append. Each is written as one line,
+            tagged with its type so the reader can reconstruct it.
+
+    Returns:
+        str: Path to the file written.
+    """
     path = _path(run_id, name)
     with open(path, "a") as fh:
         for rec in records:
@@ -43,7 +55,18 @@ def write_records(run_id: str, name: str, records: Iterable[_Record]) -> str:
 
 
 def read_records(run_id: str, name: str, expect: Type[T] = None) -> list:
-    """Read records back into their dataclass types."""
+    """Reads records back from runs/<run_id>/<name>.jsonl into their dataclass types.
+
+    Args:
+        run_id: Identifier for this run.
+        name: Record stream name, e.g. "anchors".
+        expect: If given, only records of this exact type are
+            returned; others are skipped.
+
+    Returns:
+        list: Reconstructed record instances, or an empty list if the
+        file doesn't exist.
+    """
     path = _path(run_id, name)
     out: list = []
     if not os.path.exists(path):

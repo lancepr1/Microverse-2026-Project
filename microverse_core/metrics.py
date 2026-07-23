@@ -1,4 +1,15 @@
-#!/usr/bin/env python3
+"""Evaluates detection performance against ground truth and prints a report.
+
+Compares a detector's scoreboard output against a ground-truth attack
+file, computing precision/recall/F1/FPR and time-to-detection per
+layer (global, plus per node/channel), and appends the results to a
+persistent CSV history. See .readme/metrics.md for the CSV schema and
+known limitations.
+
+Example:
+    python microverse_core/metrics.py --id 304 --difficulty hard
+"""
+
 import os
 import csv
 import json
@@ -6,36 +17,35 @@ import sys
 import argparse
 import datetime
 
-# =====================================================================
-# STATIC PATH RESOLUTION MECHANICS
-# =====================================================================
+
 def resolve_project_paths(scenario_id):
-    """
-    Traverses upwards from the script's physical location to find the 
-    enclosing project root containing the 'lanes' tree topology.
+    """Resolves the ground-truth and detector output paths for one scenario.
+
+    Args:
+        scenario_id: Scenario identifier, e.g. "304" or "easy_1".
+
+    Returns:
+        tuple[str, str]: (truth_file, detector_file) paths.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     current = script_dir
     root_dir = None
 
-    # Walk up parent folders to anchor the universal project root
     while current:
         if os.path.isdir(os.path.join(current, "lanes")):
             root_dir = current
             break
         parent = os.path.dirname(current)
-        if parent == current:  # Hit system root boundary
+        if parent == current:
             break
         current = parent
 
-    # Fallback to standard 2-level-up offset if layout markers are missing
     if not root_dir:
         root_dir = os.path.normpath(os.path.join(script_dir, "../.."))
 
     attacks_dir = os.path.join(root_dir, "lanes", "marchisano_attacks", "outputs")
     verification_dir = os.path.join(root_dir, "lanes", "leiva_verification", "outputs")
 
-    # Handle flexible id inputs (e.g., handles '1' gracefully if file is 'attack_easy_1_check.jsonl')
     truth_file = os.path.join(attacks_dir, f"attack_{scenario_id}_check.jsonl")
     easy_truth_file = os.path.join(attacks_dir, f"attack_easy_{scenario_id}_check.jsonl")
 
@@ -48,12 +58,10 @@ def resolve_project_paths(scenario_id):
 
 
 def _resolve_root_dir():
-    """
-    Same walk-up logic as resolve_project_paths() above, factored out
-    so append_to_history_csv() below can find runs/ without needing a
-    scenario_id. Kept as a near-duplicate rather than a shared refactor
-    of resolve_project_paths() itself, to avoid touching that function's
-    existing, already-working behavior for this additive change.
+    """Finds the repo root by walking up from this file until a 'lanes' folder is found.
+
+    Returns:
+        str: Path to the repo root.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     current = script_dir
@@ -70,12 +78,16 @@ def _resolve_root_dir():
         root_dir = os.path.normpath(os.path.join(script_dir, "../.."))
     return root_dir
 
-# =====================================================================
-# MATHEMATICAL EVALUATION ENGINE
-# =====================================================================
+
 def calculate_confusion_matrix(truth_list, pred_list):
-    """
-    Computes standard binary classification metrics from compiled time series.
+    """Computes standard binary classification metrics from two label sequences.
+
+    Args:
+        truth_list: Ground-truth binary labels (0/1).
+        pred_list: Predicted binary labels (0/1), same length.
+
+    Returns:
+        dict: tp, fp, tn, fn, precision, recall, f1, and fpr.
     """
     tp, fp, tn, fn = 0, 0, 0, 0
 
@@ -96,19 +108,26 @@ def calculate_confusion_matrix(truth_list, pred_list):
 
     return {
         "tp": tp, "fp": fp, "tn": tn, "fn": fn,
-        "precision": precision, "recall": recall, 
+        "precision": precision, "recall": recall,
         "f1": f1_score, "fpr": fpr
     }
 
+
 def calculate_time_to_detection(truth_list, pred_list):
-    """
-    Extracts explicit contiguous windows of active ground-truth attacks and
-    measures the telemetry frame offset latency until the first detector flag.
+    """Measures detection latency for every contiguous ground-truth attack window.
+
+    Args:
+        truth_list: Ground-truth binary labels (0/1).
+        pred_list: Predicted binary labels (0/1), same length.
+
+    Returns:
+        list[dict]: One entry per attack window, each with `window`,
+        `start`, `end`, and `ttd` (frame offset to first detection, or
+        the string "Infinite / Undetected" if never detected).
     """
     windows = []
     start_idx = None
 
-    # Step 1: Isolate active attack frames into discrete bounded intervals
     for i, t in enumerate(truth_list):
         if t == 1 and start_idx is None:
             start_idx = i
@@ -122,15 +141,14 @@ def calculate_time_to_detection(truth_list, pred_list):
         return []
 
     window_results = []
-    
-    # Step 2: Measure tracking delay inside each specific attack window
+
     for w_idx, (w_start, w_end) in enumerate(windows):
         detected_frame = None
         for i in range(w_start, w_end + 1):
             if pred_list[i] == 1:
                 detected_frame = i
                 break
-        
+
         if detected_frame is not None:
             latency = detected_frame - w_start
             window_results.append({
@@ -149,42 +167,20 @@ def calculate_time_to_detection(truth_list, pred_list):
 
     return window_results
 
-# =====================================================================
-# PERSISTENT HISTORY LOGGING -- ADDED 2026-07
-# =====================================================================
-def append_to_history_csv(scenario_id, difficulty, truth_file, detector_file, results_by_layer):
-    """
-    Appends one row per evaluated layer (Global/System, plus one per
-    node and per physical channel found) to runs/detection_history.csv,
-    building a persistent, structured record of every evaluation run
-    across however many attacks get run this week. Purely additive --
-    does not change anything about the console report
-    print_evaluation_dashboard() already produces; that still runs
-    exactly as before, every time.
 
-    difficulty is BEST-EFFORT ONLY, not fully reliable -- worth
-    understanding precisely before trusting the resulting chart's
-    easy/medium/hard buckets:
-      - "easy" is reliably auto-detected, since Easy mode's own
-        deterministic filenames self-label it (e.g. "attack_easy_2"
-        contains "easy" directly in the scenario id attack.py itself
-        produces).
-      - Medium and Hard BOTH produce unprefixed randomized numeric IDs
-        (e.g. "attack_304") with nothing in the filename or the ID
-        itself distinguishing which tier a given run came from --
-        confirmed nothing in this repo currently records that
-        distinction anywhere both attack.py and this script can read.
-        Logged as "unknown" unless explicitly passed via --difficulty.
-      - When this script is invoked automatically by
-        scripts/run_microverse.py's stage_4, there is no --difficulty
-        passed at all today, since run_microverse.py itself has no way
-        to know which tier was chosen inside attack.py's own
-        interactive prompts. Medium/Hard runs driven through the full
-        pipeline will show up as "unknown" in the history file unless
-        this gets fixed properly later (e.g. attack.py recording its
-        own difficulty choice somewhere both scripts can read) or
-        someone manually re-runs this script standalone afterward with
-        --difficulty set correctly for that scenario id.
+def append_to_history_csv(scenario_id, difficulty, truth_file, detector_file, results_by_layer):
+    """Appends one row per evaluated layer to runs/detection_history.csv.
+
+    Purely additive -- does not affect the console report produced by
+    print_evaluation_dashboard(). See .readme/metrics.md for the
+    difficulty-tier auto-detection caveat.
+
+    Args:
+        scenario_id: Scenario identifier for this run.
+        difficulty: "easy", "medium", "hard", or "unknown".
+        truth_file: Path to the ground-truth file used.
+        detector_file: Path to the detector output file used.
+        results_by_layer: Per-layer results as built by main().
     """
     root_dir = _resolve_root_dir()
     history_dir = os.path.join(root_dir, "runs")
@@ -246,12 +242,15 @@ def append_to_history_csv(scenario_id, difficulty, truth_file, detector_file, re
     print(f"\n📊 Logged {len(results_by_layer)} layer(s) to {history_path} "
           f"(difficulty recorded as: {difficulty})")
 
-# =====================================================================
-# DASHBOARD RENDERING LAYOUT
-# =====================================================================
+
 def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_by_layer):
-    """
-    Generates a structured, unified diagnostics panel comparing framework performance.
+    """Prints a formatted, per-layer detection evaluation report to the console.
+
+    Args:
+        scenario_id: Scenario identifier for this run.
+        truth_file: Path to the ground-truth file used.
+        detector_file: Path to the detector output file used.
+        results_by_layer: Per-layer results as built by main().
     """
     print("=" * 80)
     print(f"       MULTI-LAYER DETECTOR EVALUATION REPORT: SCENARIO {scenario_id}")
@@ -259,13 +258,13 @@ def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_b
     print(f"Ground Truth Reference : {os.path.basename(truth_file)}")
     print(f"Detector Output Source : {os.path.basename(detector_file)}")
     print("=" * 80)
-    
+
     for layer_name, data in results_by_layer.items():
         strict_m = data["strict_m"]
         lenient_m = data["lenient_m"]
         strict_ttd = data["strict_ttd"]
         lenient_ttd = data["lenient_ttd"]
-        
+
         print(f"\n >>> LAYER: {layer_name} <<<")
         print("-" * 80)
         row_fmt = " {:<28} | {:<22} | {:<22}"
@@ -281,8 +280,7 @@ def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_b
         print(row_fmt.format("F1-Score", f"{strict_m['f1']:.4%}", f"{lenient_m['f1']:.4%}"))
         print(row_fmt.format("False Positive Rate (FPR)", f"{strict_m['fpr']:.4%}", f"{lenient_m['fpr']:.4%}"))
         print("-" * 80)
-        
-        # Print latency profiles if attack windows were found
+
         if strict_ttd:
             print(" Latency Profiles: Time-To-Detection (TTD)")
             ttd_fmt = "   Window #{:<2} [Frames {:>4}-{:<4}] | Strict TTD: {:<12} | Lenient TTD: {:<12}"
@@ -290,7 +288,7 @@ def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_b
                 s_val = f"{s_t['ttd']} frames" if isinstance(s_t['ttd'], int) else s_t['ttd']
                 l_val = f"{l_t['ttd']} frames" if isinstance(l_t['ttd'], int) else l_t['ttd']
                 print(ttd_fmt.format(s_t['window'], s_t['start'], s_t['end'], s_val, l_val))
-            
+
             s_valid = [x['ttd'] for x in strict_ttd if isinstance(x['ttd'], int)]
             l_valid = [x['ttd'] for x in lenient_ttd if isinstance(x['ttd'], int)]
             s_avg = f"{sum(s_valid)/len(s_valid):.2f} frames" if s_valid else "N/A"
@@ -299,7 +297,7 @@ def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_b
         else:
             print(" Latency Profiles: No active attack windows registered on this layer.")
         print("-" * 80)
-    
+
     print("=" * 80)
     print(" METRIC GLOSSARY & OPERATIONAL INTERPRETATION")
     print("-" * 80)
@@ -319,14 +317,13 @@ def print_evaluation_dashboard(scenario_id, truth_file, detector_file, results_b
     print("                              (0 frames = instant, immediate edge-trigger response)")
     print("=" * 80)
 
-# =====================================================================
-# MAIN RUNNER EXECUTION
-# =====================================================================
-def main():
+
+def main() -> None:
+    """Parses CLI arguments, evaluates the scenario, prints the report, and logs history."""
     parser = argparse.ArgumentParser(description="Evaluate anomaly detection telemetry profiles against system ground truth.")
     parser.add_argument(
-        "--id", 
-        required=True, 
+        "--id",
+        required=True,
         help="Specify the target Scenario Evaluation ID (e.g., '304' or 'easy_1')"
     )
     parser.add_argument(
@@ -335,16 +332,14 @@ def main():
         choices=["easy", "medium", "hard"],
         help="Optional. Recorded in runs/detection_history.csv for this run. "
              "Auto-detected as 'easy' when the scenario id itself indicates "
-             "Easy mode -- Medium and Hard cannot be told apart automatically "
-             "(see append_to_history_csv()'s docstring), so pass this "
-             "explicitly for those if you want the history log to reflect "
-             "it correctly."
+             "Easy mode -- Medium and Hard cannot be told apart automatically, "
+             "so pass this explicitly for those if you want the history log "
+             "to reflect it correctly."
     )
     args = parser.parse_args()
 
     truth_path, detector_path = resolve_project_paths(args.id)
 
-    # File Existence Verification Gates
     if not os.path.exists(truth_path):
         print(f"Error: Missing ground truth file at path:\n '{truth_path}'")
         sys.exit(1)
@@ -352,7 +347,6 @@ def main():
         print(f"Error: Missing detector scoreboard output file at path:\n '{detector_path}'")
         sys.exit(1)
 
-    # Ingest Stream Data Arrays
     truth_rows = []
     with open(truth_path, "r") as f:
         for line in f:
@@ -365,17 +359,14 @@ def main():
             if line.strip():
                 detector_rows.append(json.loads(line))
 
-    # Synchronous Integrity Inspection Gate
     if len(truth_rows) != len(detector_rows):
         print(f"Error Frame Alignment Mismatch: Ground Truth contains {len(truth_rows)} rows, "
               f"but Detector Output contains {len(detector_rows)} rows.")
         sys.exit(1)
 
-    # Identify all base subsystems present across the files
     truth_keys = list(truth_rows[0].keys())
     detector_keys = list(detector_rows[0].keys())
 
-    # Build unique sets of base layers (e.g., "ENF", "x3115c0s33b0n0")
     bases = set()
     for k in truth_keys:
         if k.endswith("_attack") and k != "attack":
@@ -386,7 +377,6 @@ def main():
 
     results_by_layer = {}
 
-    # Setup execution layers: Always evaluate Global/System, then individual sub-layers
     layers_to_eval = [("Global / System", None)]
     for base in sorted(list(bases)):
         layers_to_eval.append((base, base))
@@ -402,9 +392,7 @@ def main():
                       f"Ground Truth index is {t_row.get('index')}, but Detector index is {d_row.get('index')}.")
                 sys.exit(1)
 
-            # --- RESOLVE TRUTH VALUE ---
             if base is None:
-                # Global / System: Use "attack", fallback to max of any "_attack" column
                 specific_attacks = [t_row[k] for k in t_row if k.endswith("_attack") and k != "attack"]
                 if "attack" in t_row:
                     truth_val = int(t_row["attack"])
@@ -413,12 +401,9 @@ def main():
                 else:
                     truth_val = 0
             else:
-                # Sub-layer Specific: Use "{base}_attack", fallback to global "attack"
                 truth_val = int(t_row.get(f"{base}_attack", t_row.get("attack", 0)))
 
-            # --- RESOLVE DETECTOR VALUE ---
             if base is None:
-                # Global / System: Use "status", fallback to max of any "_status" column
                 status_keys = [k for k in d_row if k.endswith("_status") and k != "status"]
                 if "status" in d_row:
                     status_val = float(d_row["status"])
@@ -427,22 +412,15 @@ def main():
                 else:
                     status_val = 0.0
             else:
-                # Sub-layer Specific: Use "{base}_status", fallback to generic "status"
                 status_val = float(d_row.get(f"{base}_status", d_row.get("status", 0.0)))
 
             ground_truth_attack.append(truth_val)
-            
-            # Mapping Binary Strict Target Layer (status == 1.0)
             strict_predictions.append(1 if status_val == 1.0 else 0)
-            
-            # Mapping Binary Lenient Target Layer (status >= 0.5)
             lenient_predictions.append(1 if status_val >= 0.5 else 0)
 
-        # Compute Statistical Metrics Profiles
         strict_metrics = calculate_confusion_matrix(ground_truth_attack, strict_predictions)
         lenient_metrics = calculate_confusion_matrix(ground_truth_attack, lenient_predictions)
 
-        # Compute Latency Metrics Profiles
         strict_ttd_profile = calculate_time_to_detection(ground_truth_attack, strict_predictions)
         lenient_ttd_profile = calculate_time_to_detection(ground_truth_attack, lenient_predictions)
 
@@ -453,18 +431,15 @@ def main():
             "lenient_ttd": lenient_ttd_profile
         }
 
-    # Render Results Dashboard Panel
     print_evaluation_dashboard(
         args.id, truth_path, detector_path, results_by_layer
     )
 
-    # ADDED 2026-07: persist this run's results for later cross-run
-    # analysis -- see append_to_history_csv()'s own docstring for the
-    # difficulty-tier auto-detection caveat.
     difficulty = args.difficulty
     if difficulty is None:
         difficulty = "easy" if "easy" in args.id.lower() else "unknown"
     append_to_history_csv(args.id, difficulty, truth_path, detector_path, results_by_layer)
+
 
 if __name__ == "__main__":
     main()

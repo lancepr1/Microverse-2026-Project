@@ -1,40 +1,25 @@
-"""
-data_loaders.py: get power and ENF data into the contract types.
+"""Loads power and ENF data into the project's contract record types.
 
-Two real datasets feed this project:
-  - NLR GenAI Workload Power Profiles (data.nlr.gov/submissions/312, ~1 GB).
-    5 to 10 Hz, per-node and whole-facility, real LLM and image-gen workloads.
-  - The 2025 ENF measurements collected at AFRL Rome (from the lab / Dr. Qu).
+Two real datasets feed this project: the NLR GenAI Workload Power
+Profiles (per-node and whole-facility wattmeter logs) and the AFRL
+ENF measurements. Neither ships in this repo. synthetic_power_profile()
+and synthetic_enf() produce plausible-shaped traces for development
+use only -- never for a result that goes in a paper.
 
-Neither ships in the repo (see data/README.md). The real loaders below are
-deliberately thin and marked TODO, because the exact column names live in each
-dataset's own README and should be confirmed in week one rather than guessed.
-
-Until the team has the real files, the synthetic_* generators produce
-plausible-shaped traces so every lane can develop and run the smoke test on
-day one. They are NOT a research artifact: swap in real data before any
-result goes in the paper.
-
-Pipeline (Leiva's ingestion path):
-    load_enf()               ENF CSV -> list[float], 1800 readings at 0.5 Hz
-    discover_nlr_pairs()     scans a flat folder, pairs NVML+RAPL by node name
-                             works for any number of nodes (1 to 16+)
-    load_nlr_multi()         loads all pairs, auto-detects sample rate,
-                             prefixes columns with node name
-    build_combined_records() merges ENF + all node windows into one record
-                             per index. If NLR is shorter than ENF, pads
-                             the last real NLR reading to fill the gap.
-    write_combined_jsonl()   writes merged records to JSONL for Ethan
+Pipeline (ingestion path):
+    load_enf()               ENF CSV -> list[float]
+    discover_nlr_pairs()     scans a folder, pairs NVML+RAPL logs by node
+    load_nlr_multi()         loads all pairs, auto-detects sample rate
+    build_combined_records() merges ENF + all node windows into one
+                              record per index
+    write_combined_jsonl()   writes merged records to JSONL
     read_combined_jsonl()    generator that yields one record at a time
 
-Combined record header order (node-grouped, Option A):
-    index, FRQ,
-    {node_id}_gpu-0[W] .. {node_id}_gpu-3[W],
-    {node_id}_gpu-0[C] .. {node_id}_gpu-3[C],
-    {node_id}_cpu-0[uJ] .. {node_id}_cpu-1-core[uJ],
-    {node_id}_cpu-0[W] .. {node_id}_cpu-1-core[W],
-    (repeated for each node in sorted order)
+See .readme/data_loaders.md for the real dataset details, the combined
+record's column layout, and the ENF cleaning pipeline's full
+validation history.
 """
+
 from __future__ import annotations
 
 import csv
@@ -51,17 +36,15 @@ from typing import Optional
 from .contracts import PowerSample, WorkloadClass
 
 
-# --------------------------------------------------------------------------
-# Real loaders. Fill these in against the dataset READMEs in week one.
-# --------------------------------------------------------------------------
-
 def load_nlr_profile(path: str) -> list[PowerSample]:
-    """Load one NLR power profile into PowerSample records.
+    """Loads one NLR power profile CSV into PowerSample records.
 
-    TODO (week 1, Hendricks + Lance): confirm the real schema against the
-    README at the top of the NLR zip and map its columns onto the four fields
-    below. The current implementation assumes a CSV with a header containing
-    timestamp, node_id, power_w, workload. Adjust the key names to match.
+    Args:
+        path: Path to a CSV file with timestamp, node_id, power_w,
+            and workload columns.
+
+    Returns:
+        list[PowerSample]: One record per row.
     """
     samples: list[PowerSample] = []
     with open(path, newline="") as fh:
@@ -79,22 +62,19 @@ def load_nlr_profile(path: str) -> list[PowerSample]:
 
 
 def load_enf(path: str) -> list[float]:
-    """Load the 2025 AFRL ENF dataset into a flat list of Hz readings.
+    """Loads an ENF CSV file into a flat list of Hz readings.
 
-    Real file format:
-      Row 0 col 0: "UTC: 2025-07-17 08:00:00"  (metadata, skipped)
-      Row 0 col 1: "Duration: 1 Hour"           (metadata, skipped)
-      Row 1+  col 0: integer index 0..1800
-      Row 1+  col 1: frequency in Hz e.g. "59.2938797944005"
+    Args:
+        path: Path to the ENF CSV file. The first row is metadata and
+            is skipped; each subsequent row is (index, frequency_hz).
 
-    Sample rate: 1800 samples / 3600 seconds = 0.5 Hz
-    Returns a list of 1800 floats ordered by ascending index.
-    ENF is grid-wide -- one file covers all nodes simultaneously.
+    Returns:
+        list[float]: Frequency readings in Hz, ordered by ascending index.
     """
     values: list[float] = []
     with open(path, newline="") as fh:
         reader = csv.reader(fh)
-        next(reader)  # skip metadata row (UTC timestamp + duration)
+        next(reader)
         for row in reader:
             if not row:
                 continue
@@ -105,48 +85,6 @@ def load_enf(path: str) -> list[float]:
     return values
 
 
-# ---------------------------------------------------------------------------
-# ENF cleaning -- OPTIONAL, explicit step. NOT called automatically by
-# load_enf() -- call it yourself in the pipeline (e.g. pipeline_test.py)
-# right after load_enf(), so the transformation is visible and auditable
-# rather than hidden inside loading.
-#
-# Found via diagnose_enf_glitch.py against 24 real AFRL recordings
-# (3 devices, ~20 hours): every file showed a systematic pattern of
-# large single-step jumps (mean 19.0% of all steps > 1.0 Hz across the
-# 24 files), including some mathematically impossible single-sample
-# readings (negative Hz, >100 Hz). Confirmed via raw CSV row inspection
-# this is NOT a parsing bug -- the implausible values are genuinely
-# written in the source files.
-#
-# This function detects and corrects both:
-#   - physically impossible single readings (outside a wide sanity
-#     range) -- unambiguous, no real grid frequency is negative or >80Hz
-#   - the pervasive large-step pattern, via a Hampel filter (rolling
-#     median + MAD-based outlier detection)
-#
-# IMPORTANT, validated finding: replacing detected outliers with the
-# local median (the textbook Hampel filter) creates runs of EXACTLY
-# repeated values, which collapses the natural micro-variance that
-# AnchorExtractor's Pearson-correlation confidence metric depends on --
-# this was measured to make downstream confidence WORSE, not better.
-# This implementation instead replaces outliers via LINEAR
-# INTERPOLATION between the nearest non-outlier neighbors, preserving
-# a smooth trend through the gap instead of a flat plateau.
-#
-# Measured effect (24 real files): mean large-step rate 19.0% -> 2.4%.
-# Effect on AnchorExtractor confidence is REAL but MODEST, not a full
-# fix -- confidence remains well below the current CONFIDENCE_TRUSTED
-# placeholder even after cleaning. This suggests CONFIDENCE_TRUSTED/
-# CONFIDENCE_SUSPECT are themselves uncalibrated placeholders, separate
-# from the data-quality issue -- run calibrate_thresholds.py against
-# CLEANED output, not raw data, before trusting any threshold values.
-#
-# NOT yet validated against Ethan's attack scenarios -- open question
-# whether cleaning could inadvertently smooth away a genuine injected
-# ENF attack. Test before relying on this in any result that matters.
-# ---------------------------------------------------------------------------
-
 def clean_enf(
     values: list[float],
     physical_floor: float = 40.0,
@@ -154,47 +92,35 @@ def clean_enf(
     hampel_window: int = 11,
     hampel_n_sigmas: float = 2.0,
 ) -> list[float]:
-    """
-    Detects and corrects implausible ENF readings via a two-stage
-    process, replacing all detected outliers by linear interpolation
-    between the nearest non-outlier neighbors (never a flat median --
-    see module comment above for why that matters).
+    """Detects and corrects implausible ENF readings via a two-stage process.
 
-    Stage 1: physical-range check. Any reading outside
-        [physical_floor, physical_ceiling] Hz is marked bad
-        unconditionally -- no real grid frequency is negative or
-        above ~80 Hz, this isn't a judgment call.
+    Not called automatically by load_enf() -- call this explicitly so
+    the transformation stays visible and auditable. Superseded by
+    combined_smooth() for production use; kept for anyone who wants
+    the lighter-weight version. See .readme/data_loaders.md for the
+    full validation history and why interpolation is used instead of
+    a flat median replacement.
 
-    Stage 2: Hampel filter (rolling median + MAD). For each point,
-        compares against the median of a window of hampel_window
-        samples on each side (using only already-known-good points),
-        flags it bad if it deviates more than
-        hampel_n_sigmas * 1.4826 * MAD from that local median.
+    Stage 1 (physical-range check): any reading outside
+    [physical_floor, physical_ceiling] Hz is marked bad
+    unconditionally. Stage 2 (Hampel filter): for each point, compares
+    against the median of a local window of already-known-good points,
+    flagging it bad if it deviates more than
+    `hampel_n_sigmas * 1.4826 * MAD` from that local median.
 
-    Parameters
-    ----------
-    values : list[float]
-        Raw ENF readings from load_enf().
-    physical_floor, physical_ceiling : float
-        Hard sanity bounds in Hz. Default 40-80 Hz is deliberately
-        generous -- only catches readings with no possible physical
-        interpretation, not borderline-plausible ones.
-    hampel_window : int
-        Samples on each side of the point being checked (11 was
-        tuned against 24 real files -- see module comment).
-    hampel_n_sigmas : float
-        Outlier threshold in "sigmas" (MAD-scaled). Lower = more
-        aggressive. 2.0 was chosen as a middle ground between removing
-        more of the large-step pattern (favors ~1.0-1.5) and being
-        conservative about not touching real small-scale variation
-        (favors ~3.0) -- re-validate this choice if the character of
-        future recordings differs from the 24 files this was tuned on.
+    Args:
+        values: Raw ENF readings from load_enf().
+        physical_floor: Lower sanity bound in Hz.
+        physical_ceiling: Upper sanity bound in Hz.
+        hampel_window: Samples considered on each side of the point
+            being checked.
+        hampel_n_sigmas: Outlier threshold in MAD-scaled "sigmas".
+            Lower is more aggressive.
 
-    Returns
-    -------
-    list[float]
-        Same length as input. Detected-bad points replaced via linear
-        interpolation between nearest good neighbors.
+    Returns:
+        list[float]: Same length as `values`. Detected-bad points are
+        replaced via linear interpolation between the nearest good
+        neighbors.
     """
     n = len(values)
     if n == 0:
@@ -235,47 +161,27 @@ def clean_enf(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Combined smoothing -- OPTIONAL, explicit step, added 2026-07. Supersedes
-# clean_enf() for production use (does everything clean_enf() does via
-# hampel_correct() below, PLUS a Butterworth lowpass stage on top) --
-# clean_enf() is kept in this file unchanged for anyone who wants the
-# simpler, lighter-weight version or wants to compare behavior directly.
-#
-# Requires scipy (clean_enf() and everything else in this file is
-# stdlib-only -- this is the one function in data_loaders.py that needs
-# `pip install scipy`).
-#
-# Validated (2026-07) against real ENF data:
-#   - Clean-data confidence: raw ~0.25 mean -> smoothed ~0.97-0.98 mean,
-#     replicated on two independent machines/scipy installs.
-#   - Sustained 20-sample attack: caught reliably (single-window recall
-#     varied 45%-100% across test runs due to minor scipy/floating-point
-#     version differences near a threshold boundary; local CUSUM
-#     detector caught 20/20 on every run).
-#   - Quick-splice sweep (2-44 seconds): local CUSUM caught 100% at every
-#     tested length on every run; single-window thresholding alone
-#     degrades badly on longer durations (as low as 4/22 in one run) --
-#     this is why LocalCUSUMDetector (in verification.py) exists
-#     alongside the confidence check, not as a replacement for it.
-#   - False positives on clean data: 0.00% in every tested run.
-#
-# Same architectural rule as clean_enf(): must be called EXACTLY ONCE,
-# at ingestion, before the file goes anywhere near attack injection.
-# Never call this on a file that may have already been tampered with.
-# ---------------------------------------------------------------------------
-
 def hampel_correct(
     values: list[float],
     window: int = 11,
     n_sigmas: float = 2.0,
 ) -> list[float]:
-    """
-    Same mechanism as clean_enf()'s Hampel stage -- detects outliers via
-    rolling median + MAD, replaces via linear interpolation between
-    nearest good neighbors (never a flat median -- see clean_enf()'s
-    docstring for why that matters). Factored out here so combined_smooth()
-    can call it as a distinct stage before the lowpass filter.
+    """Detects and corrects outliers via a rolling median/MAD Hampel filter.
+
+    Same mechanism as clean_enf()'s Hampel stage, factored out so
+    combined_smooth() can call it as a distinct stage before its
+    lowpass filter.
+
+    Args:
+        values: Input readings.
+        window: Samples considered on each side of the point being
+            checked.
+        n_sigmas: Outlier threshold in MAD-scaled "sigmas".
+
+    Returns:
+        list[float]: Same length as `values`, with detected outliers
+        replaced via linear interpolation between nearest good
+        neighbors.
     """
     n = len(values)
     if n == 0:
@@ -321,21 +227,25 @@ def lowpass_filter_enf(
     order: int = 10,
     nominal: float = 60.0,
 ) -> list[float]:
-    """
-    Zero-phase Butterworth lowpass filter applied to the
-    deviation-from-nominal series. Every output point is a weighted
-    combination of real input points -- unlike clean_enf(), nothing is
-    discarded or replaced with guesswork.
+    """Applies a zero-phase Butterworth lowpass filter to the ENF deviation series.
 
-    cutoff_hz is the cutoff of the filter APPLIED TO THIS TIME SERIES
-    (how fast the ENF reading is allowed to change) -- NOT the same
-    kind of quantity as clean_enf()'s physical_floor/physical_ceiling
-    (which bound the allowable VALUE range). Different knob, different
-    units, do not confuse the two.
+    Every output point is a weighted combination of real input
+    points -- unlike clean_enf(), nothing is discarded or replaced
+    with guesswork. Uses filtfilt (forward-backward) for zero phase
+    shift, since a forward-only filter would introduce a time lag
+    that would corrupt AnchorExtractor's window alignment.
 
-    Uses filtfilt (forward-backward) for zero phase shift -- a
-    forward-only filter would introduce a time lag, which would corrupt
-    AnchorExtractor's window alignment.
+    Args:
+        values: ENF readings in Hz.
+        sample_rate_hz: Sample rate of `values`.
+        cutoff_hz: Filter cutoff, in Hz, applied to this time series
+            (how fast the reading is allowed to change) -- not the
+            same kind of quantity as clean_enf()'s physical bounds.
+        order: Butterworth filter order.
+        nominal: Nominal frequency the deviation is computed against.
+
+    Returns:
+        list[float]: Filtered ENF values, same length as `values`.
     """
     from scipy.signal import butter, filtfilt
 
@@ -357,11 +267,24 @@ def combined_smooth(
     lowpass_order: int = 10,
     sample_rate_hz: float = 0.5,
 ) -> list[float]:
-    """
-    Stage 1 (hampel_correct, outlier removal) then Stage 2
-    (lowpass_filter_enf, smoothing). This is the recommended, validated
-    ENF cleaning step going forward -- call this from pipeline_test.py
-    in place of clean_enf().
+    """Cleans ENF data via outlier correction followed by lowpass smoothing.
+
+    The recommended, validated ENF cleaning step for production use --
+    call this in place of clean_enf(). Requires scipy. Must be called
+    exactly once, at ingestion, before the data goes anywhere near
+    attack injection. See .readme/data_loaders.md for validation
+    results.
+
+    Args:
+        values: Raw ENF readings from load_enf().
+        hampel_window: Passed to hampel_correct().
+        hampel_n_sigmas: Passed to hampel_correct().
+        lowpass_cutoff_hz: Passed to lowpass_filter_enf().
+        lowpass_order: Passed to lowpass_filter_enf().
+        sample_rate_hz: Passed to lowpass_filter_enf().
+
+    Returns:
+        list[float]: Cleaned and smoothed ENF values.
     """
     corrected = hampel_correct(values, window=hampel_window, n_sigmas=hampel_n_sigmas)
     return lowpass_filter_enf(
@@ -370,71 +293,49 @@ def combined_smooth(
         cutoff_hz=lowpass_cutoff_hz,
         order=lowpass_order,
     )
-
-
-# --------------------------------------------------------------------------
-# NLR wattmeter log loaders -- multi-node aware, variable sample rate
-#
-# File naming convention:
-#   nvml_wattameter_emissions_parsed_slurmid_{id}_node_{node_id}.log
-#   rapl_wattameter_emissions_parsed_slurmid_{id}_node_{node_id}.log
-#
-# Sample rates vary by workload:
-#   training workloads  ->  5 Hz  (10 samples per 2-second ENF window)
-#   inference workloads -> 10 Hz  (20 samples per 2-second ENF window)
-#
-# load_nlr_multi() auto-detects the sample rate from the first file
-# and computes the correct samples_per_window automatically.
-# --------------------------------------------------------------------------
-
 _NLR_MAX_WINDOWS = 1800
 _NLR_DATETIME_FORMAT = "%Y-%m-%d_%H:%M:%S.%f"
 
-# Regex patterns for node ID and SLURM ID extraction
-#
-# FIXED (2026-07): the old two-pattern approach (_NODE_ID_PATTERN_NEW
-# looking for "node_...", _NODE_ID_PATTERN_OLD looking for
-# "wattameter_...") broke on a real, previously-unseen filename
-# convention: nvml_wattameter_11763012-x3101c0s37b0n0.log (an
-# inference run-number prefix, no "node_" text at all). The OLD
-# pattern still matched (since "wattameter_" is present) but captured
-# "11763012-x3101c0s37b0n0" -- the run number incorrectly included as
-# part of the node ID, silently polluting every downstream column name
-# and component ID.
-#
-# Fixed by matching the actual SHAPE of a node ID directly (xNcNsNbNnN)
-# anywhere in the filename, rather than "whatever text follows a
-# specific prefix". Robust regardless of what precedes it -- tested
-# against every real filename convention seen in this project:
-# training (..._slurmid_N_node_X.log), inference/offline
-# (wattameter_X.log), and inference/online (wattameter_N-X.log).
 _NODE_ID_PATTERN = re.compile(r'(x\d+c\d+s\d+b\d+n\d+)', re.IGNORECASE)
-_SLURM_ID_PATTERN   = re.compile(r'slurmid_(\d+)', re.IGNORECASE)
+_SLURM_ID_PATTERN = re.compile(r'slurmid_(\d+)', re.IGNORECASE)
 
-# Device power limits -- readings above these are hardware errors
 _GPU_LIMIT_W = 800.0
 _CPU_LIMIT_W = 800.0
 
 
 @dataclass
 class AggregatedGPUWindow:
-    """
-    One ENF-aligned window of GPU telemetry averaged across N raw samples.
-    N = nlr_sample_rate_hz * enf_window_seconds (e.g. 10 at 5Hz, 20 at 10Hz).
-    Column names match the original NVML log header exactly.
-    index aligns with the ENF list index for the same time window.
+    """One ENF-aligned window of GPU telemetry, averaged across N raw samples.
+
+    N = nlr_sample_rate_hz * enf_window_seconds. Column names match
+    the original NVML log header. `index` aligns with the ENF list
+    index for the same time window.
+
+    Attributes:
+        index: Window index.
+        gpu0_w, gpu1_w, gpu2_w, gpu3_w: Averaged wattage per GPU,
+            converted from mW.
+        gpu0_c, gpu1_c, gpu2_c, gpu3_c: Averaged temperature per GPU.
     """
     index:  int
-    gpu0_w: float   # gpu-0[W]  averaged, converted from mW
-    gpu1_w: float   # gpu-1[W]
-    gpu2_w: float   # gpu-2[W]
-    gpu3_w: float   # gpu-3[W]
-    gpu0_c: float   # gpu-0[C]  averaged temperature
-    gpu1_c: float   # gpu-1[C]
-    gpu2_c: float   # gpu-2[C]
-    gpu3_c: float   # gpu-3[C]
+    gpu0_w: float
+    gpu1_w: float
+    gpu2_w: float
+    gpu3_w: float
+    gpu0_c: float
+    gpu1_c: float
+    gpu2_c: float
+    gpu3_c: float
 
     def to_dict(self, prefix: str = "") -> dict:
+        """Returns this window's fields as a flat dict of column names to values.
+
+        Args:
+            prefix: Optional prefix (e.g. a node ID) for every key.
+
+        Returns:
+            dict: e.g. {"gpu-0[W]": ..., "gpu-0[C]": ..., ...}.
+        """
         p = prefix
         return {
             f"{p}gpu-0[W]": round(self.gpu0_w, 4),
@@ -450,22 +351,37 @@ class AggregatedGPUWindow:
 
 @dataclass
 class AggregatedCPUWindow:
-    """
-    One ENF-aligned window of CPU telemetry averaged across N raw samples.
-    Column names match the original RAPL log header exactly.
-    index aligns with the ENF list index for the same time window.
+    """One ENF-aligned window of CPU telemetry, averaged across N raw samples.
+
+    Column names match the original RAPL log header. `index` aligns
+    with the ENF list index for the same time window.
+
+    Attributes:
+        index: Window index.
+        cpu0_uj, cpu1_uj: Averaged socket-level energy, in uJ.
+        cpu0_core_uj, cpu1_core_uj: Averaged core-domain energy, in uJ.
+        cpu0_w, cpu1_w: Averaged socket-level wattage.
+        cpu0_core_w, cpu1_core_w: Averaged core-domain wattage.
     """
     index:        int
-    cpu0_uj:      float   # cpu-0[uJ]
-    cpu0_core_uj: float   # cpu-0-core[uJ]
-    cpu1_uj:      float   # cpu-1[uJ]
-    cpu1_core_uj: float   # cpu-1-core[uJ]
-    cpu0_w:       float   # cpu-0[W]
-    cpu0_core_w:  float   # cpu-0-core[W]
-    cpu1_w:       float   # cpu-1[W]
-    cpu1_core_w:  float   # cpu-1-core[W]
+    cpu0_uj:      float
+    cpu0_core_uj: float
+    cpu1_uj:      float
+    cpu1_core_uj: float
+    cpu0_w:       float
+    cpu0_core_w:  float
+    cpu1_w:       float
+    cpu1_core_w:  float
 
     def to_dict(self, prefix: str = "") -> dict:
+        """Returns this window's fields as a flat dict of column names to values.
+
+        Args:
+            prefix: Optional prefix (e.g. a node ID) for every key.
+
+        Returns:
+            dict: e.g. {"cpu-0[uJ]": ..., "cpu-0[W]": ..., ...}.
+        """
         p = prefix
         return {
             f"{p}cpu-0[uJ]":      round(self.cpu0_uj, 4),
@@ -479,10 +395,9 @@ class AggregatedCPUWindow:
         }
 
 
-# --- internal raw row containers ------------------------------------------
-
 @dataclass
 class _RawGPURow:
+    """One unaggregated raw GPU telemetry sample."""
     gpu0_mw: float
     gpu1_mw: float
     gpu2_mw: float
@@ -495,6 +410,7 @@ class _RawGPURow:
 
 @dataclass
 class _RawCPURow:
+    """One unaggregated raw CPU telemetry sample."""
     cpu0_uj:      float
     cpu0_core_uj: float
     cpu1_uj:      float
@@ -506,24 +422,29 @@ class _RawCPURow:
 
 
 def _nlr_parse_header(line: str) -> list[str]:
+    """Parses one NLR log header line into a list of column names.
+
+    Args:
+        line: Raw header line, prefixed with "#".
+
+    Returns:
+        list[str]: Column names.
+    """
     return line.lstrip("#").split()
 
 
 def _nlr_mean(values: list[float]) -> float:
+    """Returns the mean of a list of values, or 0.0 if empty.
+
+    Args:
+        values: Values to average.
+
+    Returns:
+        float: The mean, or 0.0 for an empty list.
+    """
     return sum(values) / len(values) if values else 0.0
 
 
-# RAPL energy counters are fixed-width hardware registers: true_total is
-# stored as (true_total % _RAPL_WRAP_CEILING_UJ), so the raw readings
-# periodically drop back near zero even though real energy use only ever
-# increases. A plain modulo can't invert this -- the wrap count itself is
-# lost -- so instead we watch for the characteristic near-ceiling drop and
-# add the ceiling back on every time it happens, exactly the "phase
-# unwrap" trick used for cyclic/angular data. Must run BEFORE aggregation:
-# aggregating (averaging) raw wrapped values blends pre-wrap and post-wrap
-# numbers together whenever a wrap lands mid-window, producing a
-# meaningless window value and a bogus window-to-window "drop" that
-# doesn't match the true wrap size.
 _RAPL_WRAP_CEILING_UJ = 65_500_000_000
 _RAPL_WRAP_TOLERANCE_UJ = 2_000_000_000
 
@@ -533,16 +454,24 @@ def _unwrap_uj_series(
     wrap_ceiling: float = _RAPL_WRAP_CEILING_UJ,
     wrap_tolerance: float = _RAPL_WRAP_TOLERANCE_UJ,
 ) -> list[float]:
-    """
-    Converts a raw RAPL energy counter sequence (periodically wraps back
-    near zero) into a continuous, always-increasing sequence (true
-    cumulative energy). Call this on each channel's full raw sample
-    sequence before aggregating into ENF-aligned windows.
+    """Converts a raw, periodically-wrapping RAPL energy counter sequence into a continuous one.
 
-    Detects a wrap whenever a reading drops by roughly wrap_ceiling from
-    the previous raw reading, and from that point on adds
-    (wrap_count * wrap_ceiling) to every subsequent raw value. Handles
-    any number of wraps across the file, in order.
+    Detects a wrap whenever a reading drops by roughly `wrap_ceiling`
+    from the previous raw reading, and from that point on adds
+    `(wrap_count * wrap_ceiling)` to every subsequent raw value.
+    Handles any number of wraps across the sequence, in order. Must be
+    called on each channel's full raw sample sequence before
+    aggregating into ENF-aligned windows -- see .readme/data_loaders.md
+    for why.
+
+    Args:
+        values: Raw, possibly-wrapping energy readings, in uJ.
+        wrap_ceiling: The counter's wraparound ceiling.
+        wrap_tolerance: Tolerance for detecting a wrap event.
+
+    Returns:
+        list[float]: Same length as `values`, monotonically
+        non-decreasing.
     """
     if not values:
         return values
@@ -560,14 +489,17 @@ def _unwrap_uj_series(
 
 
 def _extract_node_id(filename: str) -> Optional[str]:
-    """
-    Extracts the node identifier from a wattmeter log filename by
-    matching its actual shape (xNcNsNbNnN) directly, rather than
-    relying on what text happens to precede it. Handles every real
-    naming convention seen in this project:
-      Training:            ..._slurmid_10742842_node_x3105c0s41b0n0.log
-      Inference (offline):  nvml_wattameter_x3115c0s33b0n0.log
-      Inference (online):   nvml_wattameter_11763012-x3101c0s37b0n0.log
+    """Extracts the node identifier from a wattmeter log filename.
+
+    Matches the node ID's actual shape (xNcNsNbNnN) directly, rather
+    than relying on what text happens to precede it -- robust across
+    every real filename convention this project has seen.
+
+    Args:
+        filename: Log file path or name.
+
+    Returns:
+        Optional[str]: The node ID, or None if no match is found.
     """
     name = Path(filename).name
     m = _NODE_ID_PATTERN.search(name)
@@ -575,14 +507,17 @@ def _extract_node_id(filename: str) -> Optional[str]:
 
 
 def _detect_sample_rate_hz(path: str, n_samples: int = 30) -> float:
-    """
-    Auto-detect NLR sample rate from the first n_samples timestamps.
+    """Auto-detects an NLR log file's sample rate from its first timestamps.
 
-    Reads only the first n_samples data rows so it stays fast on large
-    files. Returns rate rounded to the nearest integer Hz.
+    Args:
+        path: Path to the log file.
+        n_samples: Number of timestamps to read before stopping.
 
-    Training workloads  ->  5 Hz
-    Inference workloads -> 10 Hz
+    Returns:
+        float: Detected sample rate in Hz, rounded to the nearest integer.
+
+    Raises:
+        RuntimeError: If fewer than 2 readable timestamps are found.
     """
     timestamps = []
     with open(path) as fh:
@@ -624,23 +559,27 @@ def _pad_windows(
     target_length: int,
     label: str = "",
 ) -> list:
-    """
-    Pads a window list to target_length by repeating the last window.
+    """Pads a window list to a target length by repeating the last window.
 
-    If the NLR recording is shorter than the ENF file (e.g. a training
-    run that lasted 17 minutes against a 1-hour ENF file), this fills
-    the gap by holding the last real reading rather than crashing or
-    producing empty records. The padded windows are flagged with a
-    different index so downstream consumers can identify them if needed.
+    Used when an NLR recording is shorter than the ENF file it's
+    aligned to -- fills the gap by holding the last real reading
+    rather than crashing or producing empty records.
 
-    If windows is empty, returns an empty list (cannot pad nothing).
+    Args:
+        windows: Windows to pad.
+        target_length: Desired final length.
+        label: Used only in the printed status line.
+
+    Returns:
+        list: `windows`, padded to `target_length`. Returns `windows`
+        unchanged if it's already empty or long enough.
     """
     if not windows or len(windows) >= target_length:
         return windows
 
     n_real = len(windows)
-    n_pad  = target_length - n_real
-    last   = windows[-1]
+    n_pad = target_length - n_real
+    last = windows[-1]
 
     print(f"[pad_windows] {label}: {n_real} real windows, "
           f"padding {n_pad} with last reading to reach {target_length}")
@@ -659,30 +598,24 @@ def discover_nlr_pairs(
     folder: str,
     slurm_id: Optional[str] = None,
 ) -> list[tuple[str, str, str]]:
-    """
-    Scans a flat folder for NVML and RAPL log file pairs, matching them
-    by the shared node identifier in their filenames.
+    """Scans a folder for NVML/RAPL log file pairs, matched by node identifier.
 
-    Parameters
-    ----------
-    folder : str
-        Path to the flat folder containing all .log files.
-    slurm_id : str, optional
-        If provided, only files whose filename contains
-        "slurmid_{slurm_id}" are considered. Use this when a folder
-        contains multiple hours of data (each hour has a different
-        SLURM job ID) and you want to ingest one specific hour.
+    Args:
+        folder: Path to the flat folder containing all .log files.
+        slurm_id: If given, only files whose name contains
+            "slurmid_{slurm_id}" are considered -- use this when a
+            folder contains multiple hours of data.
 
-        Example -- folder contains 2 hours for 16 nodes (64 files):
-            pairs_h1 = discover_nlr_pairs("data/raw/", slurm_id="10742842")
-            pairs_h2 = discover_nlr_pairs("data/raw/", slurm_id="10742844")
+    Returns:
+        list[tuple[str, str, str]]: (node_id, nvml_path, rapl_path)
+        tuples, sorted by node_id.
 
-    Returns
-    -------
-    list of (node_id, nvml_path, rapl_path) tuples sorted by node_id.
-
-    Raises ValueError if any node has NVML but no RAPL, or vice versa,
-    or if duplicate nodes are found without a slurm_id filter.
+    Raises:
+        FileNotFoundError: If `folder` doesn't exist.
+        ValueError: If any node has an NVML file but no matching RAPL
+            file (or vice versa), if duplicate files are found for
+            the same node without a `slurm_id` filter, or if no pairs
+            are found at all.
     """
     folder_path = Path(folder)
     if not folder_path.exists():
@@ -761,6 +694,19 @@ def _parse_nvml_log(
     path: str,
     max_rows: Optional[int] = None,
 ) -> list[_RawGPURow]:
+    """Parses one NVML log file into raw GPU rows.
+
+    Args:
+        path: Path to the NVML log file.
+        max_rows: If given, stop after this many data rows.
+
+    Returns:
+        list[_RawGPURow]: One entry per valid data row. Rows with
+        wattage over _GPU_LIMIT_W are dropped as hardware errors.
+
+    Raises:
+        RuntimeError: If a data row appears before the header line.
+    """
     rows: list[_RawGPURow] = []
     header: list[str] = []
     with open(path) as fh:
@@ -807,6 +753,21 @@ def _parse_rapl_log(
     path: str,
     max_rows: Optional[int] = None,
 ) -> list[_RawCPURow]:
+    """Parses one RAPL log file into raw CPU rows, with energy counters unwrapped.
+
+    Args:
+        path: Path to the RAPL log file.
+        max_rows: If given, stop after this many data rows.
+
+    Returns:
+        list[_RawCPURow]: One entry per valid data row, with each
+        energy channel's full sequence already unwrapped (see
+        _unwrap_uj_series()). Rows with wattage over _CPU_LIMIT_W are
+        dropped as hardware errors.
+
+    Raises:
+        RuntimeError: If a data row appears before the header line.
+    """
     rows: list[_RawCPURow] = []
     header: list[str] = []
     with open(path) as fh:
@@ -846,9 +807,6 @@ def _parse_rapl_log(
                 cpu1_w=cpu1_w,             cpu1_core_w=cpu1_core_w,
             ))
 
-    # Unwrap each uJ channel's full raw sequence BEFORE any aggregation
-    # happens. Must be done here, not in _aggregate_cpu, so averaging
-    # never sees a wrapped value in the first place.
     if rows:
         unwrapped_cpu0_uj      = _unwrap_uj_series([r.cpu0_uj      for r in rows])
         unwrapped_cpu0_core_uj = _unwrap_uj_series([r.cpu0_core_uj for r in rows])
@@ -867,6 +825,16 @@ def _aggregate_gpu(
     rows: list[_RawGPURow],
     samples_per_window: int,
 ) -> list[AggregatedGPUWindow]:
+    """Aggregates raw GPU rows into ENF-aligned windows by averaging.
+
+    Args:
+        rows: Raw GPU rows, in time order.
+        samples_per_window: Number of raw samples per output window.
+
+    Returns:
+        list[AggregatedGPUWindow]: One window per group of
+        `samples_per_window` raw rows.
+    """
     windows = []
     for start in range(0, len(rows), samples_per_window):
         group = rows[start: start + samples_per_window]
@@ -890,6 +858,16 @@ def _aggregate_cpu(
     rows: list[_RawCPURow],
     samples_per_window: int,
 ) -> list[AggregatedCPUWindow]:
+    """Aggregates raw CPU rows into ENF-aligned windows by averaging.
+
+    Args:
+        rows: Raw CPU rows, in time order.
+        samples_per_window: Number of raw samples per output window.
+
+    Returns:
+        list[AggregatedCPUWindow]: One window per group of
+        `samples_per_window` raw rows.
+    """
     windows = []
     for start in range(0, len(rows), samples_per_window):
         group = rows[start: start + samples_per_window]
@@ -915,34 +893,32 @@ def load_nlr_multi(
     enf_sample_rate_hz: float = 0.5,
     max_windows: int = _NLR_MAX_WINDOWS,
 ) -> dict[str, tuple[list[AggregatedGPUWindow], list[AggregatedCPUWindow]]]:
-    """
-    Load and aggregate all node pairs returned by discover_nlr_pairs().
+    """Loads and aggregates all node pairs returned by discover_nlr_pairs().
 
-    Auto-detects the NLR sample rate from the first file so the correct
-    number of raw samples are averaged per ENF-aligned window:
-        training workloads  ->  5 Hz ->  10 samples per window
-        inference workloads -> 10 Hz -> 20 samples per window
+    Auto-detects the NLR sample rate from the first file, so the
+    correct number of raw samples are averaged per ENF-aligned window.
 
-    Parameters
-    ----------
-    pairs : list of (node_id, nvml_path, rapl_path) tuples
-    nlr_sample_rate_hz : float, optional
-        Override auto-detection. Pass 5.0 or 10.0 explicitly if needed.
-    enf_sample_rate_hz : float
-        ENF sample rate in Hz (default 0.5). Sets the window duration.
-    max_windows : int
-        Max windows per node (default 1800 = 1 hour at 0.5 Hz).
-        Windows are padded to this length in build_combined_records if
-        the recording is shorter.
+    Args:
+        pairs: (node_id, nvml_path, rapl_path) tuples.
+        nlr_sample_rate_hz: Override auto-detection if given.
+        enf_sample_rate_hz: ENF sample rate in Hz; sets the window
+            duration.
+        max_windows: Max windows to load per node.
+
+    Returns:
+        dict[str, tuple[list[AggregatedGPUWindow], list[AggregatedCPUWindow]]]:
+        One entry per node ID.
+
+    Raises:
+        ValueError: If `pairs` is empty.
     """
     if not pairs:
         raise ValueError("No node pairs provided")
 
-    # auto-detect sample rate from the first NVML file
     if nlr_sample_rate_hz is None:
         nlr_sample_rate_hz = _detect_sample_rate_hz(pairs[0][1])
 
-    enf_window_seconds = 1.0 / enf_sample_rate_hz  # 2.0s at 0.5 Hz
+    enf_window_seconds = 1.0 / enf_sample_rate_hz
     samples_per_window = round(nlr_sample_rate_hz * enf_window_seconds)
     max_raw = max_windows * samples_per_window
 
@@ -964,12 +940,6 @@ def load_nlr_multi(
     print(f"[nlr_ingest] loaded {len(node_windows)} node(s): "
           f"{list(node_windows.keys())}")
     return node_windows
-
-
-# --------------------------------------------------------------------------
-# Combined record builder
-# --------------------------------------------------------------------------
-
 def build_combined_records(
     enf: list[float],
     node_windows: dict[str, tuple[
@@ -977,44 +947,32 @@ def build_combined_records(
     ]],
     pad_short_nlr: bool = True,
 ) -> list[dict]:
-    """
-    Merge ENF and all node windows into one flat dict per index.
+    """Merges ENF and all node windows into one flat dict per index.
 
-    If the NLR recording is shorter than the ENF file (e.g. a training
-    run that lasted 17 minutes against a 1-hour ENF file), the behaviour
-    depends on pad_short_nlr:
+    Never crashes on a length mismatch between ENF and NLR data --
+    always produces a complete list of records.
 
-        True (default): pad each short node's windows by repeating the
-            last real reading until it matches the ENF length. The twin
-            keeps displaying the last known hardware state rather than
-            going blank, and the simulation continues uninterrupted.
+    Args:
+        enf: ENF frequency readings from load_enf().
+        node_windows: As returned by load_nlr_multi().
+        pad_short_nlr: If True (default), a node whose recording is
+            shorter than the ENF file has its last real reading
+            repeated to fill the gap. If False, the ENF list is
+            trimmed to the shortest node's window count instead.
 
-        False: trim ENF to the shortest node's window count instead.
-            Use this when you only want real data, no padding.
-
-    Never crashes on a length mismatch -- always produces a complete
-    list of records the same length as the ENF file (or the shortest
-    NLR window count when pad_short_nlr=False).
-
-    Parameters
-    ----------
-    enf : list[float]
-        ENF frequency readings from load_enf().
-    node_windows : dict
-        As returned by load_nlr_multi().
-    pad_short_nlr : bool
-        Whether to pad short NLR data to match ENF length (default True).
+    Returns:
+        list[dict]: One combined record per index, each containing
+        "index", "FRQ", and every node's GPU/CPU columns, prefixed by
+        node ID.
     """
     n_enf = len(enf)
 
-    # find shortest window count across all nodes
     min_nlr = min(
         min(len(gpu), len(cpu))
         for gpu, cpu in node_windows.values()
     )
 
     if pad_short_nlr:
-        # pad each node's windows up to ENF length
         padded_windows: dict[str, tuple] = {}
         for node_id, (gpu_windows, cpu_windows) in node_windows.items():
             gpu_padded = _pad_windows(gpu_windows, n_enf,
@@ -1025,7 +983,6 @@ def build_combined_records(
         target_length = n_enf
         node_windows = padded_windows
     else:
-        # trim ENF to shortest NLR
         if min_nlr < n_enf:
             print(f"[build_combined_records] trimming ENF from "
                   f"{n_enf} to {min_nlr} samples to match NLR length")
@@ -1048,7 +1005,13 @@ def build_combined_records(
 
 
 def write_combined_jsonl(records: list[dict], path: str) -> None:
-    """Write combined records to a JSON Lines file."""
+    """Writes combined records to a JSON Lines file.
+
+    Args:
+        records: Records as produced by build_combined_records().
+        path: Output file path. Parent directories are created if
+            needed.
+    """
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as fh:
@@ -1058,7 +1021,14 @@ def write_combined_jsonl(records: list[dict], path: str) -> None:
 
 
 def read_combined_jsonl(path: str):
-    """Generator that yields one combined record dict at a time."""
+    """Yields one combined record dict at a time from a JSONL file.
+
+    Args:
+        path: Path to a combined JSONL file.
+
+    Yields:
+        dict: One record per line.
+    """
     with open(path) as fh:
         for line in fh:
             line = line.strip()
@@ -1066,10 +1036,6 @@ def read_combined_jsonl(path: str):
                 continue
             yield json.loads(line)
 
-
-# --------------------------------------------------------------------------
-# Synthetic fallbacks. Shapes only, not measurements.
-# --------------------------------------------------------------------------
 
 _ENVELOPE = {
     WorkloadClass.IDLE: (90, 130),
@@ -1086,7 +1052,20 @@ def synthetic_power_profile(
     hz: int = 5,
     seed: Optional[int] = None,
 ) -> list[PowerSample]:
-    """A power trace whose *shape* matches the named workload class."""
+    """Generates a synthetic power trace whose shape matches a workload class.
+
+    For development use only -- not a research artifact.
+
+    Args:
+        workload: Workload class to shape the trace around.
+        node_id: Node identifier to stamp on every sample.
+        seconds: Duration of the generated trace.
+        hz: Sample rate.
+        seed: Optional random seed for reproducibility.
+
+    Returns:
+        list[PowerSample]: One sample per timestep.
+    """
     rng = random.Random(seed)
     lo, hi = _ENVELOPE[workload]
     n = seconds * hz
@@ -1120,9 +1099,21 @@ def synthetic_enf(
     nominal: float = 60.0,
     seed: Optional[int] = None,
 ) -> list[float]:
-    """A 60 Hz ENF trace with the small wandering fluctuation that makes
-    ENF usable as a timestamp. A replay or fabricated trace will not share
-    this wander, which is the property Leiva's verification exploits."""
+    """Generates a synthetic ENF trace with a small wandering fluctuation around nominal.
+
+    For development use only -- not a research artifact. The wander
+    is the property real verification checks depend on; a replayed or
+    fabricated trace will not share it.
+
+    Args:
+        seconds: Duration of the generated trace.
+        hz: Sample rate.
+        nominal: Nominal frequency to wander around, in Hz.
+        seed: Optional random seed for reproducibility.
+
+    Returns:
+        list[float]: Generated frequency readings, in Hz.
+    """
     rng = random.Random(seed)
     out: list[float] = []
     f = nominal
